@@ -5,6 +5,6 @@ __pycache__/
 .coverage
 .venv/
 .mcp-test-deps/
-feedback_agent_runtime.egg-info/
+*.egg-info/
 .superpowers/
 docs/

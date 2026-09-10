@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from minimal_agent.observability import TraceStore
-from minimal_agent.session import SessionStore
+from billguard.observability import TraceStore
+from billguard.session import SessionStore
 
 
 class TraceStoreTests(unittest.TestCase):

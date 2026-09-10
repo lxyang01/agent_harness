@@ -11,11 +11,11 @@ from pathlib import Path
 
 import mcp
 
-from minimal_agent.agents import FeedbackMockLLM, create_mcp_feedback_agent
-from minimal_agent.feedback import FeedbackService
-from minimal_agent.mcp_runtime import MCPClientManager, MCPError
-from minimal_agent.tools import ToolRegistry
-from minimal_agent.work_items import WorkItemStore
+from billguard.agents import FeedbackMockLLM, create_mcp_feedback_agent
+from billguard.feedback import FeedbackService
+from billguard.mcp_runtime import MCPClientManager, MCPError
+from billguard.tools import ToolRegistry
+from billguard.work_items import WorkItemStore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -51,7 +51,7 @@ MCP-002,2026-08-02 11:00:00,账户,一直收不到登录验证码,普通,处理�
         self.snapshot = self.manager.connect_stdio(
             "feedback",
             sys.executable,
-            ["-u", "-m", "minimal_agent.mcp_servers.feedback_server",
+            ["-u", "-m", "billguard.mcp_servers.feedback_server",
              "--data-dir", str(self.feedback_dir)],
             cwd=PROJECT_ROOT,
             env=mcp_subprocess_env(),
@@ -120,7 +120,7 @@ class WorkItemMCPIntegrationTests(unittest.TestCase):
         self.snapshot = self.manager.connect_stdio(
             "work-items",
             sys.executable,
-            ["-u", "-m", "minimal_agent.mcp_servers.work_item_server",
+            ["-u", "-m", "billguard.mcp_servers.work_item_server",
              "--data-dir", str(self.work_item_dir), "serve", "--transport", "stdio"],
             cwd=PROJECT_ROOT,
             env=mcp_subprocess_env(),
@@ -171,7 +171,7 @@ class StreamableHTTPMCPIntegrationTests(unittest.TestCase):
             probe.bind(("127.0.0.1", 0))
             self.port = probe.getsockname()[1]
         self.process = subprocess.Popen(
-            [sys.executable, "-u", "-m", "minimal_agent.mcp_servers.work_item_server",
+            [sys.executable, "-u", "-m", "billguard.mcp_servers.work_item_server",
              "--data-dir", str(self.root / "work-items"), "serve",
              "--transport", "streamable-http", "--host", "127.0.0.1",
              "--port", str(self.port)],

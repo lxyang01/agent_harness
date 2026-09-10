@@ -9,12 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
-from minimal_agent.auth import User
-from minimal_agent.policy import ApprovalStore, PolicyError, PolicyGateway, ToolPolicy
-from minimal_agent.session import SessionStore
-from minimal_agent.tools import Tool, ToolRegistry
-from minimal_agent.web import BusyError, FeedbackWebApp
-from minimal_agent.work_items import WorkItemError, WorkItemStore
+from billguard.auth import User
+from billguard.policy import ApprovalStore, PolicyError, PolicyGateway, ToolPolicy
+from billguard.session import SessionStore
+from billguard.tools import Tool, ToolRegistry
+from billguard.web import BusyError, FeedbackWebApp
+from billguard.work_items import WorkItemError, WorkItemStore
 
 
 def run_threaded(count: int, target: Callable[[], Any]) -> tuple[list[Any], list[Exception]]:
@@ -206,7 +206,7 @@ if __name__ == "__main__":
 
 class TaskFileAtomicityTests(unittest.TestCase):
     def test_concurrent_task_writes_never_expose_partial_file(self):
-        from minimal_agent.tools import TaskService
+        from billguard.tools import TaskService
         with tempfile.TemporaryDirectory() as temp:
             tasks = TaskService(Path(temp))
             stop = threading.Event()

@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from minimal_agent.session import SessionStore
-from minimal_agent.types import Message, Session
+from billguard.session import SessionStore
+from billguard.types import Message, Session
 
 
 class SessionOwnerTests(unittest.TestCase):

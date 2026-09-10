@@ -1,6 +1,6 @@
 const fs = require("fs");
 
-const source = fs.readFileSync("minimal_agent/web_static/app.js", "utf8");
+const source = fs.readFileSync("billguard/web_static/app.js", "utf8");
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",

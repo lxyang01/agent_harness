@@ -4,11 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from minimal_agent.auth import (
+from billguard.auth import (
     AuthError, PermissionDenied, UserStore, can,
     validate_password, validate_username,
 )
-from minimal_agent.auth import (
+from billguard.auth import (
     AuthSessionStore, Authenticator, clear_session_cookie,
     session_cookie, session_token_from_cookie,
 )

@@ -843,7 +843,7 @@ def save_adversarial_report(report: dict[str, Any], output_dir: str | Path,
         "- 未覆盖真实网络链路的 TLS、代理、供应商限流和第三方 MCP Server 漏洞。",
         "- 生产发布前还应增加并发、长 Session、提示注入语料和真实身份系统测试。",
         "", "## 6. 复现命令", "", "```powershell",
-        "python -m minimal_agent.adversarial_eval", "```", "",
+        "python -m billguard.adversarial_eval", "```", "",
     ])
     markdown = "\n".join(lines)
     markdown_path.write_text(markdown, encoding="utf-8")

@@ -4,13 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from minimal_agent.evaluation import (
+from billguard.evaluation import (
     EvaluationReportStore,
     RoutingEvaluator,
     load_eval_cases,
     save_evaluation_report,
 )
-from minimal_agent.skills import SkillRuntime
+from billguard.skills import SkillRuntime
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

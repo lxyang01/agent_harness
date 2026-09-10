@@ -9,9 +9,9 @@ import urllib.request
 from http.cookiejar import CookieJar
 from pathlib import Path
 
-from minimal_agent.agents import FeedbackMockLLM
-from minimal_agent.auth import AuthSessionStore, Authenticator, UserStore
-from minimal_agent.web import BusyError, FeedbackWebApp, make_handler
+from billguard.agents import FeedbackMockLLM
+from billguard.auth import AuthSessionStore, Authenticator, UserStore
+from billguard.web import BusyError, FeedbackWebApp, make_handler
 from http.server import ThreadingHTTPServer
 
 

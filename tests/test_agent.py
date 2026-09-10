@@ -7,16 +7,16 @@ from pathlib import Path
 
 import httpx
 
-from minimal_agent.agents import FeedbackMockLLM, PLANNING_AGENT_SPEC, create_planning_agent
-from minimal_agent.auth import User
-from minimal_agent.feedback import FeedbackFilters, FeedbackService
-from minimal_agent.harness import AgentSpec, HarnessEngine
-from minimal_agent.llm import MockLLM, OpenAICompatibleLLM
-from minimal_agent.parser import DecisionParseError, parse_decision
-from minimal_agent.session import SessionStore
-from minimal_agent.tools import DocumentService, TaskService, ToolError, build_planning_registry
-from minimal_agent.types import Message, Session
-from minimal_agent.web import PlanningWebApp
+from billguard.agents import FeedbackMockLLM, PLANNING_AGENT_SPEC, create_planning_agent
+from billguard.auth import User
+from billguard.feedback import FeedbackFilters, FeedbackService
+from billguard.harness import AgentSpec, HarnessEngine
+from billguard.llm import MockLLM, OpenAICompatibleLLM
+from billguard.parser import DecisionParseError, parse_decision
+from billguard.session import SessionStore
+from billguard.tools import DocumentService, TaskService, ToolError, build_planning_registry
+from billguard.types import Message, Session
+from billguard.web import PlanningWebApp
 
 
 class ScriptedLLM:

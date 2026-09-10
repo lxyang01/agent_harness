@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from minimal_agent.auth import AuthError, UserStore
-from minimal_agent.users import main
+from billguard.auth import AuthError, UserStore
+from billguard.users import main
 
 
 class UsersCliTests(unittest.TestCase):

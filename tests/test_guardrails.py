@@ -5,16 +5,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from minimal_agent.guardrails import (
+from billguard.guardrails import (
     MAX_MODEL_OUTPUT_CHARS,
     MAX_USER_INPUT_CHARS,
     GuardrailError,
     redact_pii,
     unsupported_numeric_claims,
 )
-from minimal_agent.harness import AgentSpec, HarnessEngine
-from minimal_agent.session import SessionStore
-from minimal_agent.tools import Tool, ToolRegistry
+from billguard.harness import AgentSpec, HarnessEngine
+from billguard.session import SessionStore
+from billguard.tools import Tool, ToolRegistry
 
 
 class QueueLLM:

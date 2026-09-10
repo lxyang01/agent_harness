@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from minimal_agent.agents import create_feedback_agent
-from minimal_agent.feedback import FeedbackService
-from minimal_agent.harness.contracts import compile_request_contract
+from billguard.agents import create_feedback_agent
+from billguard.feedback import FeedbackService
+from billguard.harness.contracts import compile_request_contract
 
 
 PROJECT_SKILLS = Path(__file__).resolve().parents[1] / "skills"

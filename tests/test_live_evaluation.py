@@ -4,9 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from minimal_agent.agents import FeedbackMockLLM
-from minimal_agent.harness import AgentResponse, RunEvent
-from minimal_agent.live_evaluation import (
+from billguard.agents import FeedbackMockLLM
+from billguard.harness import AgentResponse, RunEvent
+from billguard.live_evaluation import (
     ArgumentRule,
     LiveEvalCase,
     LiveEvaluationRunner,
@@ -15,7 +15,7 @@ from minimal_agent.live_evaluation import (
     score_live_run,
     summarize_live_results,
 )
-from minimal_agent.live_eval import parse_case_selector
+from billguard.live_eval import parse_case_selector
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -104,7 +104,7 @@ class LiveEvaluationTests(unittest.TestCase):
 
     def test_numeric_grounding_ignores_sample_and_markdown_ordinals(self):
         score, unsupported = __import__(
-            "minimal_agent.live_evaluation", fromlist=["_numeric_grounding"],
+            "billguard.live_evaluation", fromlist=["_numeric_grounding"],
         )._numeric_grounding(
             "1. 结论\n样本1：支付失败\n样本2：重复扣款，共有20条。",
             "分析反馈", [{"data": {"result": {"total": 20}}}],

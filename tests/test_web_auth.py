@@ -4,13 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from minimal_agent.auth import AuthError, PermissionDenied, User, UserStore
-from minimal_agent.feedback import FeedbackService
-from minimal_agent.web import FeedbackWebApp
+from billguard.auth import AuthError, PermissionDenied, User, UserStore
+from billguard.feedback import FeedbackService
+from billguard.web import FeedbackWebApp
 
 
 def build_app(root: Path) -> FeedbackWebApp:
-    from minimal_agent.agents import FeedbackMockLLM
+    from billguard.agents import FeedbackMockLLM
     return FeedbackWebApp(root / "web", root / "docs", FeedbackMockLLM())
 
 
@@ -45,7 +45,7 @@ class SessionOwnershipTests(unittest.TestCase):
                 with self.assertRaises(PermissionDenied):
                     method_args()
             # 归属留痕
-            from minimal_agent.session import SessionStore
+            from billguard.session import SessionStore
             self.assertEqual("alice",
                              SessionStore(root / "web" / "feedback_sessions").load("s-alice").owner)
 
@@ -53,7 +53,7 @@ class SessionOwnershipTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             app = build_app(root)
-            from minimal_agent.session import SessionStore
+            from billguard.session import SessionStore
             store = SessionStore(root / "web" / "feedback_sessions")
             store.save(store.load("legacy"))  # 无主旧文件
             boss = User("admin", "admin")
@@ -70,7 +70,7 @@ class SessionOwnershipTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             app = build_app(root)
-            from minimal_agent.session import SessionStore
+            from billguard.session import SessionStore
             store = SessionStore(root / "web" / "feedback_sessions")
             app.chat(User("mallory", "viewer"), "fresh", "总结问题")
             self.assertEqual("mallory", store.load("fresh").owner)
@@ -111,12 +111,12 @@ class ServerSideIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             users = make_users(root)
-            from minimal_agent.agents import FeedbackMockLLM
-            from minimal_agent.work_items import WorkItemStore
-            from minimal_agent.policy import ApprovalStore, PolicyGateway
+            from billguard.agents import FeedbackMockLLM
+            from billguard.work_items import WorkItemStore
+            from billguard.policy import ApprovalStore, PolicyGateway
             from types import SimpleNamespace
-            from minimal_agent.tools import Tool, ToolRegistry
-            from minimal_agent.policy import ToolPolicy
+            from billguard.tools import Tool, ToolRegistry
+            from billguard.policy import ToolPolicy
 
             work_items = WorkItemStore(root / "work-items")
             remote = work_items.prepare_issue("Fix checkout", "Investigate failures", "high")

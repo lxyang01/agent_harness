@@ -3,9 +3,9 @@ requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "feedback-agent-runtime"
-version = "0.3.0"
-description = "Auditable customer-feedback Agent Harness with Skills and MCP"
+name = "billguard"
+version = "1.0.0"
+description = "Auditable personal bill & subscription guardian Agent Harness"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -19,15 +19,15 @@ dev = [
 ]
 
 [project.scripts]
-feedback-agent-web = "minimal_agent.web:main"
-feedback-data-mcp = "minimal_agent.mcp_servers.feedback_server:main"
-work-item-mcp = "minimal_agent.mcp_servers.work_item_server:main"
-feedback-agent-eval = "minimal_agent.eval:main"
-feedback-agent-live-eval = "minimal_agent.live_eval:main"
-feedback-agent-adversarial-eval = "minimal_agent.adversarial_eval:main"
+billguard-web = "billguard.web:main"
+billguard-mcp = "billguard.mcp_servers.feedback_server:main"
+work-item-mcp = "billguard.mcp_servers.work_item_server:main"
+billguard-eval = "billguard.eval:main"
+billguard-live-eval = "billguard.live_eval:main"
+billguard-adversarial-eval = "billguard.adversarial_eval:main"
 
 [tool.setuptools.packages.find]
-include = ["minimal_agent*"]
+include = ["billguard*"]
 
 [tool.setuptools.package-data]
-minimal_agent = ["web_static/*"]
+billguard = ["web_static/*"]

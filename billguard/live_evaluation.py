@@ -454,13 +454,13 @@ class LiveEvaluationRunner:
             with MCPClientManager(request_timeout=self.request_timeout) as manager:
                 manager.connect_stdio(
                     "feedback", sys.executable,
-                    ["-u", "-m", "minimal_agent.mcp_servers.feedback_server",
+                    ["-u", "-m", "billguard.mcp_servers.feedback_server",
                      "--data-dir", str(feedback_dir), "--transport", "stdio"],
                     cwd=self.project_root,
                 )
                 manager.connect_stdio(
                     "work-items", sys.executable,
-                    ["-u", "-m", "minimal_agent.mcp_servers.work_item_server",
+                    ["-u", "-m", "billguard.mcp_servers.work_item_server",
                      "--data-dir", str(work_item_dir), "serve", "--transport", "stdio"],
                     cwd=self.project_root,
                 )

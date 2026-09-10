@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from minimal_agent.adversarial_evaluation import (
+from billguard.adversarial_evaluation import (
     AdversarialEvaluator,
     save_adversarial_report,
 )
@@ -48,7 +48,7 @@ class AdversarialEvaluationTests(unittest.TestCase):
             markdown = Path(paths["canonical_markdown"]).read_text(encoding="utf-8")
             self.assertIn("对抗评测与失败案例报告", markdown)
             self.assertIn("adv-015", markdown)
-            self.assertIn("python -m minimal_agent.adversarial_eval", markdown)
+            self.assertIn("python -m billguard.adversarial_eval", markdown)
             self.assertTrue(Path(paths["json"]).is_file())
 
 

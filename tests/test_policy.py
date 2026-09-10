@@ -6,14 +6,14 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from minimal_agent.auth import User
-from minimal_agent.harness import AgentSpec, HarnessEngine
-from minimal_agent.policy import ApprovalStore, PolicyError, PolicyGateway, ToolPolicy
-from minimal_agent.session import SessionStore
-from minimal_agent.skills import SkillRuntime
-from minimal_agent.tools import Tool, ToolRegistry
-from minimal_agent.web import FeedbackWebApp
-from minimal_agent.work_items import WorkItemStore
+from billguard.auth import User
+from billguard.harness import AgentSpec, HarnessEngine
+from billguard.policy import ApprovalStore, PolicyError, PolicyGateway, ToolPolicy
+from billguard.session import SessionStore
+from billguard.skills import SkillRuntime
+from billguard.tools import Tool, ToolRegistry
+from billguard.web import FeedbackWebApp
+from billguard.work_items import WorkItemStore
 
 
 class QueueLLM:

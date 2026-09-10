@@ -670,7 +670,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
         mcp_manager.connect_stdio(
             "feedback",
             sys.executable,
-            ["-u", "-m", "minimal_agent.mcp_servers.feedback_server",
+            ["-u", "-m", "billguard.mcp_servers.feedback_server",
              "--data-dir", str(feedback_dir)],
             cwd=project_root,
         )
@@ -682,7 +682,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
     users_store = UserStore(auth_root)
     if users_store.count() == 0:
         print("用户库为空,请先创建管理员:")
-        print('  python -m minimal_agent.users --data-dir <data-dir> add admin --role admin')
+        print('  python -m billguard.users --data-dir <data-dir> add admin --role admin')
         raise SystemExit(1)
     authenticator = Authenticator(users_store, AuthSessionStore(auth_root))
     server = ThreadingHTTPServer(
