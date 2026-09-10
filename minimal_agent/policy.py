@@ -182,12 +182,16 @@ class ApprovalStore:
             if row["status"] != "pending":
                 raise PolicyError(f"approval is already {row['status']}: {approval_id}")
             status = "approved" if approved else "rejected"
-            db.execute(
+            # 条件 UPDATE 是并发下的唯一裁决者:SELECT 与 UPDATE 之间存在竞态窗口,
+            # 恰好一个线程的 rowcount=1,其余在提交前被拒绝。
+            cursor = db.execute(
                 "UPDATE approvals SET status = ?, decided_at = ?, decided_by = ?, decision_note = ? "
-                "WHERE id = ?",
+                "WHERE id = ? AND status = 'pending'",
                 (status, datetime.now(timezone.utc).isoformat(), decided_by,
                  note.strip()[:1000], approval_id),
             )
+            if cursor.rowcount == 0:
+                raise PolicyError(f"approval is already decided: {approval_id}")
         return self.get(approval_id)
 
     def mark_execution(self, approval_id: str, succeeded: bool,
