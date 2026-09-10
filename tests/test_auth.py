@@ -198,3 +198,17 @@ def sqlite3_text(path: Path) -> str:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PasswordResetTests(unittest.TestCase):
+    def test_password_reset_invalidates_existing_sessions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "auth"
+            users = UserStore(root)
+            users.create("alice", "alice-pass-123", "viewer")
+            auth = Authenticator(users, AuthSessionStore(root))
+            _, token = auth.login("alice", "alice-pass-123")
+            self.assertEqual("alice", auth.resolve_user(FakeHeaders(f"session={token}")).username)
+            users.reset_password("alice", "new-pass-12345")
+            with self.assertRaises(AuthError):
+                auth.resolve_user(FakeHeaders(f"session={token}"))

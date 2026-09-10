@@ -388,6 +388,7 @@ class FeedbackWebApp:
         updates = body.get("updates", {})
         if not isinstance(ticket_ids, list) or not isinstance(updates, dict):
             raise ValueError("ticket_ids and updates are required")
+        updates.pop("operator", None)  # 身份一律取服务端,防止与 kwarg 冲突
         return self.feedback.update_workflow(ticket_ids, user.username, **updates)
 
     def feedback_audits(self, body: dict[str, Any]) -> dict[str, Any]:

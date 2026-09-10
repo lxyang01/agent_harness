@@ -172,3 +172,20 @@ class ServerSideIdentityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkflowOperatorKeyTests(unittest.TestCase):
+    def test_update_workflow_ignores_operator_key_in_updates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = build_app(root)
+            service = FeedbackService(root / "web" / "feedback")
+            service.import_csv("demo.csv",
+                               "ticket_id,created_at,content\nTK-1,2026-08-04 10:30:00,微信支付失败\n")
+            result = app.update_workflow(User("alice", "approver"), {
+                "ticket_ids": ["TK-1"],
+                "updates": {"status": "处理中", "operator": "ghost"},
+                "operator": "ghost"})
+            self.assertEqual(1, result["count"])
+            audits = service.feedback_audits("TK-1")
+            self.assertEqual("alice", audits[-1]["operator"])

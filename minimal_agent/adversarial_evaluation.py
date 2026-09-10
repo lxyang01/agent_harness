@@ -76,17 +76,6 @@ def _decision_final(answer: str) -> dict[str, Any]:
     return {"thought": "adversarial final", "final": answer}
 
 
-class _AuthQueueLLM:
-    def __init__(self, outputs: list[dict]) -> None:
-        self.outputs = list(outputs)
-
-    def complete(self, messages, tools) -> str:
-        import json
-        if not self.outputs:
-            raise AssertionError("unexpected model call")
-        return json.dumps(self.outputs.pop(0), ensure_ascii=False)
-
-
 class _AuthFakeManager:
     def __init__(self, store: WorkItemStore) -> None:
         self.store = store
@@ -672,7 +661,7 @@ class AdversarialEvaluator:
         users.create("mallory", "viewer-pass-1234", "viewer")
         work_items = WorkItemStore(root / "work-items")
         remote = work_items.prepare_issue("Fix checkout", "Investigate failures", "high")
-        llm = _AuthQueueLLM([
+        llm = QueueLLM([
             {"thought": "commit", "tool_call": {"name": "work-items.commit_issue",
                                                 "arguments": {"approval_id": remote["approval_id"]}}},
             {"thought": "done", "final": "Issue created"},

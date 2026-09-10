@@ -202,3 +202,42 @@ class LlmSemaphoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TaskFileAtomicityTests(unittest.TestCase):
+    def test_concurrent_task_writes_never_expose_partial_file(self):
+        from minimal_agent.tools import TaskService
+        with tempfile.TemporaryDirectory() as temp:
+            tasks = TaskService(Path(temp))
+            stop = threading.Event()
+            errors: list[Exception] = []
+
+            def writer() -> None:
+                index = 0
+                while not stop.is_set() and index < 60:
+                    try:
+                        tasks.create("s1", f"task-{index}")
+                    except Exception as exc:
+                        errors.append(exc)
+                        return
+                    index += 1
+
+            def reader() -> None:
+                while not stop.is_set():
+                    try:
+                        tasks.list("s1")
+                    except Exception as exc:
+                        errors.append(exc)
+                        return
+
+            writers = [threading.Thread(target=writer) for _ in range(3)]
+            readers = [threading.Thread(target=reader) for _ in range(3)]
+            for thread in writers + readers:
+                thread.start()
+            for thread in writers:
+                thread.join(timeout=15)
+            stop.set()
+            for thread in readers:
+                thread.join(timeout=5)
+            self.assertEqual([], errors)
+            self.assertGreaterEqual(len(tasks.list("s1")["tasks"]), 1)

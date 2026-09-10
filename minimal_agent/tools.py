@@ -3,7 +3,10 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import operator
+import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -189,6 +192,8 @@ class TaskService:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        # 读-改-写与 os.replace 全程互斥:Windows 上替换被并发读打开的文件会失败
+        self._io_lock = threading.Lock()
 
     def _path(self, session_id: str) -> Path:
         key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
@@ -207,7 +212,15 @@ class TaskService:
             raise ToolError(f"cannot load tasks: {exc}") from exc
 
     def _save(self, session_id: str, tasks: list[dict[str, Any]]) -> None:
-        self._path(session_id).write_text(json.dumps(tasks, ensure_ascii=False, indent=2), encoding="utf-8")
+        # tempfile + os.replace 原子落盘,并发读不会看到半截文件
+        fd, tmp_name = tempfile.mkstemp(prefix="tasks-", suffix=".tmp", dir=self.root)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(tasks, handle, ensure_ascii=False, indent=2)
+            os.replace(tmp_name, self._path(session_id))
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
 
     @staticmethod
     def _find(tasks: list[dict[str, Any]], task_id: str) -> dict[str, Any]:
@@ -218,45 +231,53 @@ class TaskService:
 
     def create(self, session_id: str, title: str, priority: str = "medium",
                estimate_hours: float | None = None, notes: str = "") -> dict[str, Any]:
-        tasks = self._load(session_id)
-        next_number = max([int(task["id"][1:]) for task in tasks] or [0]) + 1
-        task = {"id": f"T{next_number:03d}", "title": title, "status": "pending",
-                "priority": priority, "estimate_hours": estimate_hours, "notes": notes}
-        tasks.append(task)
-        self._save(session_id, tasks)
-        return {"created": task, "count": len(tasks), "storage_path": str(self._path(session_id))}
+        with self._io_lock:
+            tasks = self._load(session_id)
+            next_number = max([int(task["id"][1:]) for task in tasks] or [0]) + 1
+            task = {"id": f"T{next_number:03d}", "title": title, "status": "pending",
+                    "priority": priority, "estimate_hours": estimate_hours, "notes": notes}
+            tasks.append(task)
+            self._save(session_id, tasks)
+            return {"created": task, "count": len(tasks), "storage_path": str(self._path(session_id))}
+
 
     def list(self, session_id: str, status: str | None = None) -> dict[str, Any]:
-        tasks = self._load(session_id)
-        selected = [task for task in tasks if status is None or task["status"] == status]
-        return {"tasks": selected, "count": len(selected), "filter": status,
-                "storage_path": str(self._path(session_id))}
+        with self._io_lock:
+            tasks = self._load(session_id)
+            selected = [task for task in tasks if status is None or task["status"] == status]
+            return {"tasks": selected, "count": len(selected), "filter": status,
+                    "storage_path": str(self._path(session_id))}
+
 
     def update(self, session_id: str, task_id: str, title: str | None = None,
                priority: str | None = None, estimate_hours: float | None = None,
                notes: str | None = None, status: str | None = None) -> dict[str, Any]:
-        tasks = self._load(session_id)
-        task = self._find(tasks, task_id)
-        updates = {key: value for key, value in {
-            "title": title, "priority": priority, "estimate_hours": estimate_hours,
-            "notes": notes, "status": status,
-        }.items() if value is not None}
-        if not updates:
-            raise ToolError("at least one task field must be updated")
-        task.update(updates)
-        self._save(session_id, tasks)
-        return {"updated": task, "storage_path": str(self._path(session_id))}
+        with self._io_lock:
+            tasks = self._load(session_id)
+            task = self._find(tasks, task_id)
+            updates = {key: value for key, value in {
+                "title": title, "priority": priority, "estimate_hours": estimate_hours,
+                "notes": notes, "status": status,
+            }.items() if value is not None}
+            if not updates:
+                raise ToolError("at least one task field must be updated")
+            task.update(updates)
+            self._save(session_id, tasks)
+            return {"updated": task, "storage_path": str(self._path(session_id))}
+
 
     def complete(self, session_id: str, task_id: str) -> dict[str, Any]:
         return self.update(session_id, task_id, status="completed")
 
     def delete(self, session_id: str, task_id: str) -> dict[str, Any]:
-        tasks = self._load(session_id)
-        task = self._find(tasks, task_id)
-        tasks.remove(task)
-        self._save(session_id, tasks)
-        return {"deleted": task, "remaining_count": len(tasks),
-                "storage_path": str(self._path(session_id))}
+        with self._io_lock:
+            tasks = self._load(session_id)
+            task = self._find(tasks, task_id)
+            tasks.remove(task)
+            self._save(session_id, tasks)
+            return {"deleted": task, "remaining_count": len(tasks),
+                    "storage_path": str(self._path(session_id))}
+
 
 
 def _task_line(task: dict[str, Any]) -> str:
