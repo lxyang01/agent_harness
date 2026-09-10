@@ -4,6 +4,7 @@ import json
 import math
 import sqlite3
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -211,6 +212,12 @@ class AdversarialEvaluator:
                 "adv-020", "sandbox", "critical", "文档路径穿越",
                 "读取 docs 根目录之外的 ../secret.md。", "路径解析必须拒绝越界。",
                 "继续使用 resolve + is_relative_to 校验。", self._path_traversal,
+            ),
+            AdversarialCase(
+                "adv-021", "concurrency", "high", "并发审批双提交",
+                "8 个线程同时对同一 pending 审批提交 approve。",
+                "恰好一次决定生效,其余被拒绝;工单只创建一次。",
+                "审批决定使用条件 UPDATE 乐观并发,decide 全程持会话锁。", self._concurrent_approval,
             ),
         ]
 
@@ -655,7 +662,6 @@ class AdversarialEvaluator:
     def _forged_approver(self, root: Path) -> ProbeResult:
         # The web layer now owns identity: decided_by comes from the authenticated
         # user and the approval capability gate runs before any store mutation.
-        import json as _json
         users = UserStore(root / "auth")
         users.create("alice", "approver-pass-123", "approver")
         users.create("mallory", "viewer-pass-1234", "viewer")
@@ -710,6 +716,52 @@ class AdversarialEvaluator:
             {"error": error},
         )
 
+
+
+    def _concurrent_approval(self, root: Path) -> ProbeResult:
+        # 阶段 2 并发加固验证:条件 UPDATE + 会话锁应保证并发决定恰好一次生效。
+        users = UserStore(root / "auth")
+        users.create("alice", "approver-pass-123", "approver")
+        work_items = WorkItemStore(root / "work-items")
+        remote = work_items.prepare_issue("Fix checkout", "Investigate failures", "high")
+        llm = QueueLLM([
+            {"thought": "commit", "tool_call": {"name": "work-items.commit_issue",
+                                                "arguments": {"approval_id": remote["approval_id"]}}},
+            {"thought": "done", "final": "Issue created"},
+        ])
+        gateway = PolicyGateway(ApprovalStore(root / "web" / "policy"))
+        authenticator = Authenticator(users, AuthSessionStore(root / "auth"))
+        app = FeedbackWebApp(root / "web", root / "docs", llm, _AuthFakeManager(work_items),
+                             gateway, work_items, authenticator)
+        alice = User("alice", "approver")
+        paused = app.chat(alice, "approval-session", "$executive-report create issue")
+        barrier = threading.Barrier(8)
+        outcomes: list[bool] = []
+
+        def worker() -> None:
+            barrier.wait()
+            try:
+                app.decide_approval(alice, "approval-session", {
+                    "approval_id": paused["approval"]["id"], "decision": "approve"})
+                outcomes.append(True)
+            except Exception:
+                outcomes.append(False)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        winners = sum(1 for item in outcomes if item)
+        issues = work_items.list_issues()["items"]
+        protected = winners == 1 and len(issues) == 1
+        return ProbeResult(
+            protected,
+            "并发审批恰好一次生效。" if protected
+            else f"并发审批产生 {winners} 次决定成功,工单 {len(issues)} 条。",
+            {"winners": winners, "issues": len(issues),
+             "remote_status": work_items.approval(remote["approval_id"])["status"]},
+        )
 
 def save_adversarial_report(report: dict[str, Any], output_dir: str | Path,
                             canonical_markdown: str | Path | None = None) -> dict[str, str]:

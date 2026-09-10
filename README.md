@@ -285,6 +285,7 @@ Agent 回答可以保存为洞察报告。报告支持：
 ### 当前边界
 
 - 已接入强制登录与最简三角色（admin/approver/viewer）；审批人身份 `decided_by` 与操作人 `operator` 均取服务端登录身份。企业级 SSO（OIDC/LDAP）与租户数据隔离尚未接入。
+- 已加入 LLM 并发上限与 429 限流（`--max-concurrent-llm`，默认 4）；审批决定与会话写入已并发加固，请求排队/线程池尚未接入。
 - 标签自动分类主要使用关键词规则，不是逐条调用大模型。
 - 基础脱敏覆盖手机号、邮箱和常见订单号，不应替代企业级数据脱敏系统。
 - PDF 通过浏览器打印功能生成，浏览器阻止弹窗时需要允许本地页面打开弹窗。
@@ -327,9 +328,9 @@ python -m minimal_agent.web --llm openai --base-url "https://openrouter.ai/api/v
 python -m minimal_agent.adversarial_eval
 ```
 
-评测覆盖模型协议破坏、工具越权、Schema 参数注入、无限循环、动态参数契约、报告结构契约、提前结束、高风险审批绕过、审批重放、Checkpoint 篡改、无证据数字、PII 泄露、资源预算、伪造审批身份和路径穿越。
+评测覆盖模型协议破坏、工具越权、Schema 参数注入、无限循环、动态参数契约、报告结构契约、提前结束、高风险审批绕过、审批重放、Checkpoint 篡改、无证据数字、PII 泄露、资源预算、伪造审批身份、路径穿越和并发审批双提交。
 
-首轮基线成功防御 15/20（75%）；接入资源预算、数字门禁与 PII 脱敏后达到 19/20；阶段 1 身份层落地（登录 + 最简角色 + 服务端审批身份）后，当前固定基线成功防御 20/20（100%），探针异常为 0。完整结论、复现证据和修复建议见本地 `docs/adversarial_evaluation_report.md`（运行 `python -m minimal_agent.adversarial_eval` 可随时再生成）。
+首轮基线成功防御 15/20（75%）；接入资源预算、数字门禁与 PII 脱敏后达到 19/20；阶段 1 身份层（登录 + 最简角色 + 服务端审批身份）与阶段 2 并发加固（审批乐观并发 + 会话锁 + LLM 并发上限）落地后，当前固定基线成功防御 21/21（100%），探针异常为 0。完整结论、复现证据和修复建议见本地 `docs/adversarial_evaluation_report.md`（运行 `python -m minimal_agent.adversarial_eval` 可随时再生成）。
 
 ## CSV 格式
 
