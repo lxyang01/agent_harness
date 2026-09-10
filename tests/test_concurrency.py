@@ -13,7 +13,7 @@ from minimal_agent.auth import User
 from minimal_agent.policy import ApprovalStore, PolicyError, PolicyGateway, ToolPolicy
 from minimal_agent.session import SessionStore
 from minimal_agent.tools import Tool, ToolRegistry
-from minimal_agent.web import FeedbackWebApp
+from minimal_agent.web import BusyError, FeedbackWebApp
 from minimal_agent.work_items import WorkItemError, WorkItemStore
 
 
@@ -160,6 +160,44 @@ class SessionLockRaceTests(unittest.TestCase):
                             f"chat 结果丢失: {contents}")
             self.assertTrue(any("审批后回答" in content for content in contents),
                             f"审批恢复结果丢失: {contents}")
+
+
+class _BlockingLLM:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def complete(self, messages, tools) -> str:
+        self.started.set()
+        self.release.wait(timeout=5)
+        return json.dumps({"thought": "done", "final": "ok"}, ensure_ascii=False)
+
+
+class LlmSemaphoreTests(unittest.TestCase):
+    def test_over_limit_chat_gets_busy_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            llm = _BlockingLLM()
+            app = FeedbackWebApp(root / "web", root / "docs", llm,
+                                 max_concurrent_llm=1)
+            alice = User("alice", "approver")
+            result: dict[str, Any] = {}
+
+            def run_chat() -> None:
+                try:
+                    result["response"] = app.chat(alice, "s1", "hi")
+                except Exception as exc:
+                    result["error"] = exc
+
+            thread = threading.Thread(target=run_chat)
+            thread.start()
+            self.assertTrue(llm.started.wait(timeout=5))  # 独占槽位的模型调用进行中
+            with self.assertRaises(BusyError):
+                app.chat(alice, "s2", "hi")  # 不同 session,不与会话锁冲突
+            llm.release.set()
+            thread.join(timeout=10)
+            self.assertIsNone(result.get("error"))
+            self.assertEqual("completed", result["response"]["status"])
 
 
 if __name__ == "__main__":
