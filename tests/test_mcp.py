@@ -11,8 +11,7 @@ from pathlib import Path
 
 import mcp
 
-from billguard.agents import FeedbackMockLLM, create_mcp_feedback_agent
-from billguard.feedback import FeedbackService
+from billguard.bills import BillService
 from billguard.mcp_runtime import MCPClientManager, MCPError
 from billguard.tools import ToolRegistry
 from billguard.work_items import WorkItemStore
@@ -33,15 +32,20 @@ def mcp_subprocess_env() -> dict[str, str]:
     return env
 
 
-class MCPIntegrationTests(unittest.TestCase):
+class BillServerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.feedback_dir = self.root / "feedback"
-        service = FeedbackService(self.feedback_dir)
-        service.import_csv("feedback.csv", """ticket_id,created_at,product_module,content,customer_tier,status
-MCP-001,2026-08-01 10:00:00,支付,支付失败但已经扣款,高级,待处理
-MCP-002,2026-08-02 11:00:00,账户,一直收不到登录验证码,普通,处理中
+        self.bills_dir = self.root / "bills"
+        service = BillService(self.bills_dir)
+        service.import_bills("bills.csv", """tx_id,paid_at,merchant,category,amount,method,note
+BG-001,2026-09-01 08:30:00,饿了么,餐饮,35.5,支付宝,午餐外卖
+BG-002,2026-09-02 12:10:00,滴滴出行,交通,26.0,微信,打车到公司 联系电话 13812345678
+BG-003,2026-09-03 19:45:00,美团,餐饮,88.0,支付宝,家庭晚餐
+BG-004,2026-09-05 20:00:00,爱奇艺,订阅,35.0,支付宝,视频会员自动续费
+""")
+        service.import_subscriptions("subscriptions.csv", """name,merchant,cycle,expected_amount
+视频会员,爱奇艺,月,25.0
 """)
         self.audit: list[tuple[str, dict]] = []
         self.manager = MCPClientManager(
@@ -49,10 +53,10 @@ MCP-002,2026-08-02 11:00:00,账户,一直收不到登录验证码,普通,处理�
             audit_hook=lambda event, data: self.audit.append((event, data)),
         )
         self.snapshot = self.manager.connect_stdio(
-            "feedback",
+            "bill",
             sys.executable,
-            ["-u", "-m", "billguard.mcp_servers.feedback_server",
-             "--data-dir", str(self.feedback_dir)],
+            ["-u", "-m", "billguard.mcp_servers.bill_server",
+             "--data-dir", str(self.bills_dir)],
             cwd=PROJECT_ROOT,
             env=mcp_subprocess_env(),
         )
@@ -63,52 +67,103 @@ MCP-002,2026-08-02 11:00:00,账户,一直收不到登录验证码,普通,处理�
 
     def test_capability_discovery_tools_resources_and_prompts(self):
         self.assertEqual("stdio", self.snapshot.transport)
-        self.assertEqual("Feedback Data MCP", self.snapshot.server_name)
+        self.assertEqual("BillGuard Data MCP", self.snapshot.server_name)
         self.assertEqual({
             "aggregate", "query", "compare_periods", "detect_anomalies",
             "get_samples", "update_status",
         }, {tool.name for tool in self.snapshot.tools})
-        self.assertIn("feedback://schema", self.snapshot.resources)
-        self.assertIn("investigate-feedback-spike", self.snapshot.prompts)
+        self.assertEqual({
+            "bill://schema", "bill://categories", "bill://metric-definitions",
+        }, set(self.snapshot.resources))
+        self.assertEqual({
+            "investigate-bill-anomaly", "monthly-guard-report",
+        }, set(self.snapshot.prompts))
 
-        schema = self.manager.read_resource("feedback", "feedback://schema")
-        self.assertIn("ticket_id", str(schema))
+        schema = self.manager.read_resource("bill", "bill://schema")
+        self.assertIn("tx_id", str(schema))
+        categories = self.manager.read_resource("bill", "bill://categories")
+        self.assertIn("餐饮", str(categories))
         prompt = self.manager.get_prompt(
-            "feedback", "investigate-feedback-spike", {"days": "7", "dimension": "tag"},
+            "bill", "investigate-bill-anomaly", {"days": "7", "dimension": "price_hike"},
         )
         self.assertIn("最近 7 天", str(prompt))
+        self.assertIn("price_hike", str(prompt))
 
-    def test_tool_call_and_registry_adapter_return_structured_data(self):
-        overview = self.manager.call_tool("feedback", "aggregate", {})
-        self.assertEqual(2, overview["total"])
+    def test_detect_anomalies_dimension_enum_and_price_hike_flag(self):
+        tool = next(item for item in self.snapshot.tools if item.name == "detect_anomalies")
+        self.assertEqual(
+            ["spike", "duplicate", "price_hike", "outlier"],
+            tool.input_schema["properties"]["dimension"]["enum"],
+        )
+        update = next(item for item in self.snapshot.tools if item.name == "update_status")
+        self.assertEqual("high_write", update.policy.risk_level)
+        self.assertTrue(update.policy.requires_approval)
+
+        result = self.manager.call_tool("bill", "detect_anomalies", {
+            "days": 7, "dimension": "price_hike", "limit": 10,
+        })
+        self.assertEqual("price_hike", result["dimension"])
+        names = {item["name"] for item in result["items"]}
+        self.assertIn("视频会员", names)
+        flagged = next(item for item in result["items"] if item["name"] == "视频会员")
+        self.assertEqual(25.0, flagged["evidence"]["expected_amount"])
+        self.assertEqual(35.0, flagged["evidence"]["actual_amount"])
+        self.assertIn("上涨", flagged["detail"])
+
+    def test_query_and_get_samples_return_masked_notes(self):
+        queried = self.manager.call_tool("bill", "query", {"query": "打车", "limit": 10})
+        self.assertEqual(1, queried["total"])
+        self.assertTrue(queried["pii_masked"])
+        self.assertIn("[手机号]", queried["items"][0]["note"])
+        self.assertNotIn("13812345678", queried["items"][0]["note"])
+
+        sampled = self.manager.call_tool("bill", "get_samples", {
+            "merchant": "滴滴出行", "limit": 5,
+        })
+        self.assertEqual(1, sampled["matched"])
+        self.assertTrue(sampled["pii_masked"])
+        self.assertIn("[手机号]", sampled["samples"][0]["note"])
+
+    def test_aggregate_and_registry_adapter_return_structured_data(self):
+        overview = self.manager.call_tool("bill", "aggregate", {})
+        self.assertEqual(4, overview["count"])
+        self.assertEqual(184.5, overview["total_amount"])
+        self.assertEqual(0, overview["pending"])
 
         registry = ToolRegistry()
-        registered = self.manager.register_tools(registry, "feedback")
-        self.assertIn("feedback.aggregate", registered)
+        registered = self.manager.register_tools(registry, "bill")
+        self.assertIn("bill.aggregate", registered)
         queried = registry.execute(
-            "feedback.query", {"product_module": "支付", "limit": 10}, allowed=registered,
+            "bill.query", {"merchant": "美团", "limit": 10}, allowed=registered,
         )
         self.assertEqual(1, queried["total"])
         self.assertTrue(queried["pii_masked"])
         self.assertTrue(any(event == "mcp_tool_end" for event, _ in self.audit))
 
-    def test_harness_runs_with_dynamically_discovered_mcp_tools(self):
-        agent = create_mcp_feedback_agent(
-            FeedbackMockLLM(), "mcp-session", self.manager,
-            self.root / "sessions", PROJECT_ROOT / "skills",
-        )
-        result = agent.run("mcp-session", "总结客户反馈中的主要问题")
-        self.assertEqual(("feedback-triage",), result.active_skills)
-        self.assertIn("2 条客户反馈", result.answer)
-        trace = next((self.root / "sessions" / "traces").glob("*.jsonl")).read_text(encoding="utf-8")
-        self.assertIn("feedback.aggregate", trace)
+    def test_update_status_maps_to_workflow_with_status_enum(self):
+        result = self.manager.call_tool("bill", "update_status", {
+            "tx_ids": ["BG-001"], "status": "待核查",
+            "operator": "mcp-test", "note": "金额需要核对",
+        })
+        self.assertEqual(["BG-001"], result["updated_tx_ids"])
+        self.assertEqual(1, result["count"])
+        self.assertEqual("待核查", result["changes"]["status"])
+
+        audited = BillService(self.bills_dir).transaction_audits("BG-001")
+        self.assertEqual("workflow", audited[-1]["action"])
+        self.assertEqual("mcp-test", audited[-1]["operator"])
+
+        with self.assertRaises(MCPError):
+            self.manager.call_tool("bill", "update_status", {
+                "tx_ids": ["BG-001"], "status": "无效状态", "operator": "mcp-test",
+            })
 
     def test_unknown_remote_tool_and_closed_manager_fail_safely(self):
         with self.assertRaises(MCPError):
-            self.manager.call_tool("feedback", "not_advertised", {})
+            self.manager.call_tool("bill", "not_advertised", {})
         self.manager.close()
         with self.assertRaises(MCPError):
-            self.manager.call_tool("feedback", "aggregate", {})
+            self.manager.call_tool("bill", "aggregate", {})
 
 
 class WorkItemMCPIntegrationTests(unittest.TestCase):

@@ -670,7 +670,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
         mcp_manager.connect_stdio(
             "feedback",
             sys.executable,
-            ["-u", "-m", "billguard.mcp_servers.feedback_server",
+            ["-u", "-m", "billguard.mcp_servers.bill_server",
              "--data-dir", str(feedback_dir)],
             cwd=project_root,
         )

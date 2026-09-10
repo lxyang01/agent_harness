@@ -20,7 +20,7 @@ dev = [
 
 [project.scripts]
 billguard-web = "billguard.web:main"
-billguard-mcp = "billguard.mcp_servers.feedback_server:main"
+billguard-mcp = "billguard.mcp_servers.bill_server:main"
 work-item-mcp = "billguard.mcp_servers.work_item_server:main"
 billguard-eval = "billguard.eval:main"
 billguard-live-eval = "billguard.live_eval:main"
