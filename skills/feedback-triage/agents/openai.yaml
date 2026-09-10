@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feedback Triage"
+  short_description: "Evidence-first customer feedback triage"
+  default_prompt: "Use $feedback-triage to triage this customer feedback question with evidence."

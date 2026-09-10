@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.sessions/
+.sessions*/
+.coverage
+.venv/
+.mcp-test-deps/
+feedback_agent_runtime.egg-info/
+.superpowers/
+docs/

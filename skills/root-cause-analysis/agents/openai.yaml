@@ -1,0 +1,4 @@
+interface:
+  display_name: "Root Cause Analysis"
+  short_description: "Separate facts from causal hypotheses"
+  default_prompt: "Use $root-cause-analysis to analyze likely causes without overstating certainty."

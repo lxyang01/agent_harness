@@ -1,0 +1,12 @@
+{
+  "claim": "",
+  "evidence_type": "statistic_or_sample",
+  "source_tool": "",
+  "query_scope": {},
+  "current_value": null,
+  "baseline_value": null,
+  "sample_ids": [],
+  "confidence": "low_medium_or_high",
+  "limitations": []
+}
+
