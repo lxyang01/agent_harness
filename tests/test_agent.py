@@ -7,16 +7,16 @@ from pathlib import Path
 
 import httpx
 
-from billguard.agents import FeedbackMockLLM, PLANNING_AGENT_SPEC, create_planning_agent
+from billguard.agents import PLANNING_AGENT_SPEC, BillMockLLM, create_planning_agent
 from billguard.auth import User
-from billguard.feedback import FeedbackFilters, FeedbackService
+from billguard.bills import BillFilters, BillService
 from billguard.harness import AgentSpec, HarnessEngine
 from billguard.llm import MockLLM, OpenAICompatibleLLM
 from billguard.parser import DecisionParseError, parse_decision
 from billguard.session import SessionStore
 from billguard.tools import DocumentService, TaskService, ToolError, build_planning_registry
 from billguard.types import Message, Session
-from billguard.web import PlanningWebApp
+from billguard.web import BillGuardApp
 
 
 class ScriptedLLM:
@@ -242,97 +242,84 @@ class PlanningAgentTests(unittest.TestCase):
         self.assertIn("tool_call", outputs[0]["raw"])
 
     @staticmethod
-    def feedback_csv() -> str:
-        return """ticket_id,created_at,product_module,content,customer_tier,status
-TK-001,2026-08-01 10:00:00,支付,微信支付失败但已经扣款,高级,待处理
-TK-002,2026-08-02 11:00:00,账户,一直收不到登录验证码,普通,处理中
-TK-003,2026-08-03 12:00:00,支付,退款三天还没有到账,企业,已完成
+    def bills_csv() -> str:
+        return """tx_id,paid_at,merchant,category,amount,method,note
+TX-001,2026-09-01 08:30:00,美团外卖,餐饮,32.5,支付宝,午餐
+TX-002,2026-09-02 09:00:00,滴滴出行,交通,25.0,微信支付,打车到公司
+TX-003,2026-09-03 12:00:00,Apple Store,购物,899.0,信用卡,购买显示器
+TX-004,2026-09-04 12:05:00,Apple Store,购物,899.0,信用卡,疑似重复扣款 订单号 SO-88990011
 """
 
-    def test_feedback_import_deduplicate_query_and_tag_audit(self):
-        service = FeedbackService(self.root / "feedback-state")
-        first = service.import_csv("feedback.csv", self.feedback_csv())
-        self.assertEqual(3, first["imported_rows"])
-        second = service.import_csv("feedback.csv", self.feedback_csv())
-        self.assertEqual(3, second["duplicate_rows"])
+    def test_bill_import_deduplicate_query_and_category_audit(self):
+        service = BillService(self.root / "bill-state")
+        first = service.import_bills("bills.csv", self.bills_csv())
+        self.assertEqual(4, first["imported_rows"])
+        second = service.import_bills("bills.csv", self.bills_csv())
+        self.assertEqual(4, second["duplicate_rows"])
+        self.assertEqual(2, len(service.imports()))
 
         overview = service.overview()
-        self.assertEqual(3, overview["total"])
-        self.assertIn("支付问题", [item["name"] for item in overview["top_tags"]])
-        payment = service.query(FeedbackFilters(product_module="支付"))
-        self.assertEqual(2, payment["total"])
-        sample = service.samples(tag="支付问题", limit=5)
+        self.assertEqual(4, overview["count"])
+        self.assertEqual(1855.5, overview["total_amount"])
+        self.assertEqual("Apple Store", overview["max_tx"]["merchant"])
+        dining = service.query(BillFilters(category="餐饮"))
+        self.assertEqual(1, dining["total"])
+        sample = service.samples(category="餐饮", limit=5)
         self.assertTrue(sample["pii_masked"])
-        self.assertGreater(service.query(FeedbackFilters(query="支付问题"))["total"], 0)
-        self.assertGreater(service.query(FeedbackFilters(query="登录问题"))["total"], 0)
-        empty = service.samples(query="完全不存在的问题", limit=5)
+        self.assertGreater(service.query(BillFilters(query="显示器"))["total"], 0)
+        empty = service.samples(query="完全不存在的商户", limit=5)
         self.assertEqual(0, empty["matched"])
         self.assertIn("retry_hint", empty)
 
-        updated = service.update_tags("TK-001", ["支付故障", "高优先级"], "tester")
-        self.assertEqual(["支付故障", "高优先级"], updated["new_tags"])
-        exported = service.export_csv(FeedbackFilters(tag="支付故障"))
-        self.assertIn("TK-001", exported)
-        self.assertNotIn("TK-002", exported)
+        recategorized = service.update_transaction_category("TX-002", "订阅", "tester")
+        self.assertEqual("交通", recategorized["old_category"])
+        self.assertEqual("订阅", recategorized["new_category"])
+        exported = service.export_csv(BillFilters(category="订阅"))
+        self.assertIn("TX-002", exported)
+        self.assertNotIn("TX-001", exported)
 
-        anomalies = service.anomalies(days=1, dimension="tag")
-        self.assertEqual("2026-08-03", anomalies["anchor_date"])
-        self.assertTrue(any(item["name"] == "退款问题" and item["is_new"] for item in anomalies["items"]))
-        report = service.save_report("analysis-a", "本周洞察", "支付问题需要重点关注")
+        duplicates = service.anomalies(days=31, dimension="duplicate")
+        self.assertTrue(any(item["name"].startswith("Apple Store") for item in duplicates["items"]))
+        report = service.save_report("analysis-a", "本周守卫", "购物类支出需要重点关注")
         self.assertEqual(1, len(service.reports()))
         service.delete_report(report["id"])
         self.assertEqual([], service.reports())
 
-        rule = service.save_tag_rule("到账异常", ["没有到账", "未到账"], True, operator="tester")
-        rematched = service.rematch_tags()
-        self.assertEqual(3, rematched["feedback_count"])
-        self.assertGreater(service.query(FeedbackFilters(tag="到账异常"))["total"], 0)
-        service.save_tag_rule("到账异常", ["未到账"], False, tag_id=rule["id"], operator="tester")
-        self.assertFalse(next(tag for tag in service.tags() if tag["id"] == rule["id"])["enabled"])
-        self.assertGreaterEqual(len(service.tag_rule_audits()), 2)
+        rule = service.save_category("数码", ["显示器", "显卡"], True, operator="tester")
+        rematched = service.rematch_categories(operator="tester")
+        self.assertEqual(4, rematched["transactions"])
+        self.assertGreater(service.query(BillFilters(category="数码"))["total"], 0)
+        service.save_category("数码", ["显示器"], False, category_id=rule["id"], operator="tester")
+        self.assertFalse(next(item for item in service.categories() if item["id"] == rule["id"])["enabled"])
+        self.assertGreaterEqual(len(service.recent_audits()), 2)
 
-        workflow = service.update_workflow(["TK-001", "TK-002"], "tester", status="处理中",
-                                           priority="high", assignee="产品团队", internal_notes="正在排查")
+        workflow = service.update_workflow(["TX-001", "TX-002"], "tester", status="待核查", note="批量核查")
         self.assertEqual(2, workflow["count"])
-        high_priority = service.query(FeedbackFilters(priority="high"))
-        self.assertEqual(2, high_priority["total"])
-        self.assertEqual("产品团队", high_priority["items"][0]["assignee"])
-        self.assertTrue(service.feedback_audits("TK-001"))
+        pending = service.query(BillFilters(status="待核查"))
+        self.assertEqual(2, pending["total"])
+        audits = service.transaction_audits("TX-001")
+        self.assertEqual("tester", audits[-1]["operator"])
+        self.assertIn("批量核查", audits[-1]["new_value"])
 
     def test_web_app_snapshot_chat_import_and_session_delete(self):
-        app = PlanningWebApp(self.root / "web-state", self.docs, FeedbackMockLLM())
-        # Task 4 起 production skills 只信任 bill.* 工具;本地 Feedback Agent 演示
-        # 链路(Task 5 迁移 Web 层)在测试内使用旧 feedback 技能夹具,保持对
-        # Web 管道(chat/证据/快照/会话删除)的覆盖不变。
-        legacy_skills = self.root / "legacy-skills"
-        triage = legacy_skills / "feedback-triage"
-        triage.mkdir(parents=True)
-        (triage / "SKILL.md").write_text(
-            "---\nname: feedback-triage\ndescription: Legacy fixture for the web pipeline test.\n---\n\n"
-            "用反馈工具回答概览问题。", encoding="utf-8")
-        (legacy_skills / "routes.json").write_text(json.dumps({
-            "default_skill": "feedback-triage",
-            "routes": [{"skill": "feedback-triage", "triggers": ["反馈", "问题"],
-                        "allowed_tools": ["feedback_overview", "feedback_search", "feedback_samples"]}],
-        }, ensure_ascii=False), encoding="utf-8")
-        from billguard.agents import create_feedback_agent
-        app._agent = lambda session_id: create_feedback_agent(
-            app.llm, session_id, app.session_dir, app.feedback, skill_dir=legacy_skills)
+        app = BillGuardApp(self.root / "web-state", self.docs, BillMockLLM())
         user = User("tester", "approver")
         empty = app.snapshot(user, "web-project")
-        self.assertEqual(0, empty["overview"]["total"])
+        self.assertEqual(0, empty["overview"]["count"])
         self.assertEqual("web-project", empty["sessions"][0]["id"])
+        self.assertTrue(empty["categories"])  # 空库也播种默认类别
+        self.assertIn("items", empty["bills"])
 
-        imported = app.import_feedback({"filename": "feedback.csv", "csv_text": self.feedback_csv()})
-        self.assertEqual(3, imported["result"]["imported_rows"])
-        result = app.chat(user, "web-project", "总结客户反馈中的主要问题")
-        self.assertIn("3 条客户反馈", result["answer"])
+        imported = app.import_bills({"filename": "bills.csv", "csv_text": self.bills_csv()})
+        self.assertEqual(4, imported["result"]["imported_rows"])
+        result = app.chat(user, "web-project", "总结一下当前的支出情况")
+        self.assertIn("4 笔支出", result["answer"])
         self.assertTrue(result["evidence"])
-        queried = app.feedback_query({"filters": {"product_module": "支付"}})
+        queried = app.bill_query({"filters": {"merchant": "Apple Store"}})
         self.assertEqual(2, queried["total"])
-        anomaly_result = app.feedback_anomalies({"days": 1, "dimension": "tag"})
+        anomaly_result = app.bill_anomalies({"days": 31, "dimension": "duplicate"})
         self.assertTrue(anomaly_result["items"])
-        saved = app.save_report(user, "web-project", {"title": "洞察", "content": result["answer"]})
+        saved = app.save_report(user, "web-project", {"title": "守卫报告", "content": result["answer"]})
         self.assertEqual(1, len(saved["reports"]))
         removed = app.delete_report({"report_id": saved["report"]["id"]})
         self.assertEqual([], removed["reports"])
@@ -341,16 +328,16 @@ TK-003,2026-08-03 12:00:00,支付,退款三天还没有到账,企业,已完成
         self.assertTrue(restored["messages"])
         assistant_messages = [item for item in restored["messages"] if item["role"] == "assistant"]
         self.assertTrue(assistant_messages[-1]["evidence"])
-        self.assertEqual(3, restored["overview"]["total"])
+        self.assertEqual(4, restored["overview"]["count"])
         self.assertGreater(restored["sessions"][0]["message_count"], 0)
 
-        trace_path = self.root / "web-state" / "feedback_sessions" / "traces" / f"{SessionStore._key('web-project')}.jsonl"
+        trace_path = self.root / "web-state" / "billguard" / "sessions" / "traces" / f"{SessionStore._key('web-project')}.jsonl"
         self.assertTrue(trace_path.exists())
         deleted = app.delete_session(user, "web-project")
         self.assertTrue(deleted["deleted"])
         self.assertNotIn("web-project", [item["id"] for item in deleted["sessions"]])
         self.assertFalse(trace_path.exists())
-        self.assertEqual(3, app.feedback.overview()["total"])
+        self.assertEqual(4, app.bills.overview()["count"])
 
 
 if __name__ == "__main__":

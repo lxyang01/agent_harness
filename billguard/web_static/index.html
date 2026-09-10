@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Feedback Lens · 客户反馈洞察</title>
+  <title>BillGuard · 账单守卫</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <div id="login-overlay" class="login-overlay" hidden>
     <form id="login-form" class="login-card">
-      <div class="login-mark">F</div>
-      <h2>Feedback Lens</h2><p>请登录后继续使用客户反馈洞察工作台</p>
+      <div class="login-mark">B</div>
+      <h2>BillGuard 账单守卫</h2><p>请登录后继续使用账单守卫工作台</p>
       <label>用户名<input id="login-username" autocomplete="username" required></label>
       <label>密码<input id="login-password" type="password" autocomplete="current-password" required></label>
       <div id="login-error" class="login-error" hidden></div>
@@ -19,15 +19,15 @@
   </div>
   <div class="app-shell">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">F</span><div><strong>Feedback Lens</strong><small>Insight Agent</small></div></div>
+      <div class="brand"><span class="brand-mark">B</span><div><strong>BillGuard</strong><small>账单守卫</small></div></div>
       <button id="new-session" class="new-session"><span>＋</span> 新建分析</button>
       <nav class="primary-nav">
-        <button class="nav-item active" data-panel="overview"><span class="nav-icon">⌂</span>数据概览</button>
-        <button class="nav-item" data-panel="insight"><span class="nav-icon">✦</span>洞察 Agent</button>
-        <button class="nav-item" data-panel="feedback"><span class="nav-icon">≡</span>反馈明细 <b id="feedback-count">0</b></button>
-        <button class="nav-item" data-panel="tags"><span class="nav-icon">#</span>标签管理</button>
-        <button class="nav-item" data-panel="reports"><span class="nav-icon">□</span>洞察报告 <b id="report-count">0</b></button>
-        <button class="nav-item" data-panel="imports"><span class="nav-icon">⇧</span>导入记录</button>
+        <button class="nav-item active" data-panel="overview"><span class="nav-icon">⌂</span>支出概览</button>
+        <button class="nav-item" data-panel="insight"><span class="nav-icon">✦</span>守卫 Agent</button>
+        <button class="nav-item" data-panel="bills"><span class="nav-icon">≡</span>交易明细 <b id="bills-count">0</b></button>
+        <button class="nav-item" data-panel="categories"><span class="nav-icon">#</span>类别管理</button>
+        <button class="nav-item" data-panel="reports"><span class="nav-icon">□</span>守卫报告 <b id="report-count">0</b></button>
+        <button class="nav-item" data-panel="imports"><span class="nav-icon">⇧</span>账单导入</button>
         <button class="nav-item" data-panel="approvals"><span class="nav-icon">✓</span>审批中心 <b id="approval-count">0</b></button>
         <button class="nav-item" data-panel="runs"><span class="nav-icon">◎</span>运行观测 <b id="run-count">0</b></button>
         <button class="nav-item" data-panel="evaluations"><span class="nav-icon">◇</span>自动评测 <b id="evaluation-count">0</b></button>
@@ -37,72 +37,73 @@
         <div class="session-heading"><span>分析会话</span><button id="refresh-sessions" title="刷新">↻</button></div>
         <div id="session-list" class="session-list"></div>
       </div>
-      <div class="sidebar-note"><span class="pulse"></span><div><strong>服务已连接</strong><small>反馈数据保存在本机</small></div></div>
+      <div class="sidebar-note"><span class="pulse"></span><div><strong>服务已连接</strong><small>账单数据保存在本机</small></div></div>
     </aside>
 
     <main>
       <header>
         <button id="mobile-menu" aria-label="打开菜单">☰</button>
-        <div class="header-title"><p class="eyebrow">CUSTOMER INTELLIGENCE</p><h1 id="page-title">数据概览</h1></div>
-        <div class="header-actions"><div class="user-badge" id="user-badge" hidden><span id="user-name"></span><b id="user-role"></b></div><button id="logout" class="secondary" hidden>登出</button><div class="active-session"><span>当前分析</span><strong id="active-session-name">feedback-analysis</strong></div><button class="import-shortcut" id="import-shortcut" data-panel-target="imports">导入 CSV</button></div>
+        <div class="header-title"><p class="eyebrow">BILL GUARD</p><h1 id="page-title">支出概览</h1></div>
+        <div class="header-actions"><div class="user-badge" id="user-badge" hidden><span id="user-name"></span><b id="user-role"></b></div><button id="logout" class="secondary" hidden>登出</button><div class="active-session"><span>当前分析</span><strong id="active-session-name">billguard</strong></div><button class="import-shortcut" id="import-shortcut" data-panel-target="imports">导入 CSV</button></div>
       </header>
 
       <section id="overview-panel" class="panel active">
         <div class="panel-toolbar">
-          <div><h2>反馈概览</h2><p>从客户声音中发现值得优先处理的问题。</p></div>
-          <div class="toolbar-fields"><select id="overview-period"><option value="">全部时间</option><option value="7">最近 7 天</option><option value="30">最近 30 天</option><option value="90">最近 90 天</option></select><select id="overview-module"><option value="">全部模块</option></select></div>
+          <div><h2>支出概览</h2><p>看清钱花在哪里,先发现异常再逐笔核查。</p></div>
+          <div class="toolbar-fields"><select id="overview-period"><option value="">全部时间</option><option value="7">最近 7 天</option><option value="30">最近 30 天</option><option value="90">最近 90 天</option></select><select id="overview-category"><option value="">全部类别</option></select></div>
         </div>
         <div class="kpi-grid">
-          <article class="kpi"><span>反馈总量</span><strong id="kpi-total">0</strong><small>当前筛选范围</small></article>
-          <article class="kpi"><span>待处理</span><strong id="kpi-pending">0</strong><small id="kpi-pending-rate">占比 0%</small></article>
-          <article class="kpi"><span>问题标签</span><strong id="kpi-tags">0</strong><small>已识别问题类型</small></article>
-          <article class="kpi accent"><span>最高频问题</span><strong id="kpi-top-tag">暂无</strong><small id="kpi-top-tag-count">等待数据</small></article>
+          <article class="kpi"><span>总支出</span><strong id="kpi-total">¥0</strong><small>当前筛选范围</small></article>
+          <article class="kpi"><span>待核查</span><strong id="kpi-pending">0</strong><small id="kpi-pending-rate">占比 0%</small></article>
+          <article class="kpi"><span>本月异常</span><strong id="kpi-anomalies">0</strong><small>近 31 天类别激增</small></article>
+          <article class="kpi accent"><span>最大单笔</span><strong id="kpi-max-tx">暂无</strong><small id="kpi-max-tx-note">等待数据</small></article>
         </div>
         <div class="dashboard-grid">
-          <article class="chart-card trend-card"><div class="card-heading"><div><h3>反馈趋势</h3><p>按天统计反馈数量</p></div></div><div id="trend-chart" class="trend-chart"></div></article>
-          <article class="chart-card"><div class="card-heading"><div><h3>产品模块</h3><p>问题集中在哪些区域</p></div></div><div id="module-chart" class="bar-list"></div></article>
-          <article class="chart-card topics-card"><div class="card-heading"><div><h3>高频问题</h3><p>点击标签查看对应反馈</p></div><button id="ask-topics">让 Agent 分析</button></div><div id="topic-list" class="topic-list"></div></article>
-          <article class="chart-card"><div class="card-heading"><div><h3>客户等级</h3><p>不同客户群的反馈分布</p></div></div><div id="tier-chart" class="bar-list"></div></article>
-          <article class="chart-card anomaly-card"><div class="card-heading"><div><h3>异常增长</h3><p id="anomaly-period">与上一周期对比</p></div><button id="ask-anomalies">让 Agent 解释</button></div><div id="anomaly-list" class="anomaly-list"></div></article>
+          <article class="chart-card trend-card"><div class="card-heading"><div><h3>支出趋势</h3><p>按天统计支出金额</p></div></div><div id="trend-chart" class="trend-chart"></div></article>
+          <article class="chart-card"><div class="card-heading"><div><h3>类别分布</h3><p>钱集中在哪些类别</p></div></div><div id="category-chart" class="bar-list"></div></article>
+          <article class="chart-card topics-card"><div class="card-heading"><div><h3>高频商户</h3><p>点击商户查看对应交易</p></div><button id="ask-topics">让 Agent 分析</button></div><div id="merchant-list" class="topic-list"></div></article>
+          <article class="chart-card"><div class="card-heading"><div><h3>订阅服务</h3><p>预期金额与最近扣款</p></div></div><div id="subscription-list" class="bar-list"></div></article>
+          <article class="chart-card anomaly-card"><div class="card-heading"><div><h3>异常检测</h3><p id="anomaly-period">与上一周期对比</p></div><button id="ask-anomalies">让 Agent 解释</button></div><div id="anomaly-list" class="anomaly-list"></div></article>
         </div>
       </section>
 
       <section id="insight-panel" class="panel insight-panel">
         <div id="empty-state" class="empty-state">
-          <div class="hero-icon">✦</div><h2>问问客户反馈</h2><p>Agent 只基于真实统计和脱敏样本回答。</p>
+          <div class="hero-icon">✦</div><h2>问问账单守卫</h2><p>Agent 只基于真实账单统计和脱敏样本回答。</p>
           <div class="suggestions">
-            <button data-prompt="总结当前客户反馈中的主要问题"><span>01</span><div><strong>总结主要问题</strong><small>查看高频标签与模块</small></div></button>
-            <button data-prompt="对比最近7天和上一周期的反馈变化"><span>02</span><div><strong>比较周期变化</strong><small>识别增长和下降</small></div></button>
-            <button data-prompt="查看一些典型的原始反馈样本"><span>03</span><div><strong>查看典型反馈</strong><small>使用已脱敏原文</small></div></button>
+            <button data-prompt="总结当前的支出结构，说明数据事实"><span>01</span><div><strong>总结支出结构</strong><small>查看类别分布与高频商户</small></div></button>
+            <button data-prompt="对比最近30天和上一周期的支出变化"><span>02</span><div><strong>比较周期变化</strong><small>识别激增和回落</small></div></button>
+            <button data-prompt="查看一些典型的脱敏交易样本"><span>03</span><div><strong>查看典型交易</strong><small>使用已脱敏明细</small></div></button>
           </div>
         </div>
         <div id="messages" class="messages"></div>
-        <div class="composer-wrap"><form id="composer"><textarea id="message" rows="1" placeholder="例如：最近 7 天最值得关注的问题是什么？" maxlength="8000"></textarea><button id="send" type="submit" aria-label="发送">↑</button></form><p>Enter 发送 · 回答中的数字均来自反馈数据库</p></div>
+        <div class="composer-wrap"><form id="composer"><textarea id="message" rows="1" placeholder="例如：最近 30 天的钱主要花在哪里？" maxlength="8000"></textarea><button id="send" type="submit" aria-label="发送">↑</button></form><p>Enter 发送 · 回答中的数字均来自账单数据库</p></div>
       </section>
 
-      <section id="feedback-panel" class="panel">
-        <div class="panel-toolbar"><div><h2>反馈明细</h2><p>筛选、查看并修正客户反馈标签。</p></div><button id="export-feedback" class="primary">导出当前结果</button></div>
-        <div class="filter-bar"><input id="filter-query" placeholder="搜索工单 ID 或反馈内容"><select id="filter-module"><option value="">全部模块</option></select><select id="filter-tier"><option value="">全部客户</option></select><select id="filter-status"><option value="">全部状态</option></select><select id="filter-priority"><option value="">全部优先级</option><option value="urgent">紧急</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option></select><select id="filter-tag"><option value="">全部标签</option></select><button id="apply-filters">筛选</button></div>
-        <div id="bulk-bar" class="bulk-bar"><strong><span id="selected-count">0</span> 条已选择</strong><select id="bulk-status"><option value="">保持状态</option><option>待处理</option><option>处理中</option><option>已完成</option></select><select id="bulk-priority"><option value="">保持优先级</option><option value="urgent">紧急</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option></select><input id="bulk-assignee" placeholder="负责人（不修改可留空）"><button id="apply-bulk">批量更新</button></div>
-        <div class="table-card"><div class="table-scroll"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="选择当前页"></th><th>工单</th><th>创建时间</th><th>产品模块</th><th>反馈内容</th><th>客户</th><th>状态</th><th>优先级</th><th>负责人</th><th>标签</th><th></th></tr></thead><tbody id="feedback-rows"></tbody></table></div><div class="pagination"><span id="feedback-total">共 0 条</span><div><button id="prev-page">上一页</button><span id="page-number">1</span><button id="next-page">下一页</button></div></div></div>
+      <section id="bills-panel" class="panel">
+        <div class="panel-toolbar"><div><h2>交易明细</h2><p>筛选、查看并修正交易类别与核查状态。</p></div><button id="export-bills" class="primary">导出当前结果</button></div>
+        <div class="filter-bar"><input id="filter-query" placeholder="搜索交易编号、商户或备注"><select id="filter-category"><option value="">全部类别</option></select><input id="filter-merchant" placeholder="商户"><select id="filter-method"><option value="">全部方式</option></select><select id="filter-status"><option value="">全部状态</option><option>正常</option><option>待核查</option><option>核查中</option><option>已确认</option><option>已忽略</option></select><button id="apply-filters">筛选</button></div>
+        <div id="bulk-bar" class="bulk-bar"><strong><span id="selected-count">0</span> 笔已选择</strong><select id="bulk-status"><option value="">保持状态</option><option>正常</option><option>待核查</option><option>核查中</option><option>已确认</option><option>已忽略</option></select><input id="bulk-note" placeholder="备注（可选，最长 200 字）"><button id="apply-bulk">批量更新</button></div>
+        <div class="table-card"><div class="table-scroll"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="选择当前页"></th><th>时间</th><th>商户</th><th>类别</th><th>金额</th><th>方式</th><th>状态</th><th></th></tr></thead><tbody id="bills-rows"></tbody></table></div><div class="pagination"><span id="bills-total">共 0 笔</span><div><button id="prev-page">上一页</button><span id="page-number">1</span><button id="next-page">下一页</button></div></div></div>
       </section>
 
-      <section id="tags-panel" class="panel">
-        <div class="panel-toolbar"><div><h2>标签管理</h2><p>编辑关键词规则并重新匹配历史反馈；所有修改都会留下审计记录。</p></div><div class="toolbar-buttons"><button id="rematch-tags" class="secondary">重新匹配历史反馈</button><button id="new-tag-rule" class="primary">＋ 新建标签</button></div></div>
-        <div id="tag-grid" class="tag-grid"></div>
-        <div class="section-subheading"><h3>规则修改记录</h3></div><div id="tag-audit-list" class="audit-list"></div>
+      <section id="categories-panel" class="panel">
+        <div class="panel-toolbar"><div><h2>类别管理</h2><p>编辑关键词规则并重新归类历史交易；所有修改都会留下审计记录。</p></div><div class="toolbar-buttons"><button id="rematch-categories" class="secondary">重新归类历史交易</button><button id="new-category-rule" class="primary">＋ 新建类别</button></div></div>
+        <div id="category-grid" class="tag-grid"></div>
+        <div class="section-subheading"><h3>审计记录</h3></div><div id="category-audit-list" class="audit-list"></div>
       </section>
 
       <section id="reports-panel" class="panel">
-        <div class="panel-toolbar"><div><h2>洞察报告</h2><p>从 Agent 回答中保存的分析结论，便于复盘和分享。</p></div></div>
+        <div class="panel-toolbar"><div><h2>守卫报告</h2><p>从 Agent 回答中保存的守卫结论，便于复盘和分享。</p></div></div>
         <div id="report-list" class="report-list"></div>
       </section>
 
       <section id="imports-panel" class="panel">
-        <div class="panel-toolbar"><div><h2>导入反馈</h2><p>支持 UTF-8 CSV，按工单 ID 自动去重。</p></div></div>
-        <label id="drop-zone" class="drop-zone"><input id="csv-file" type="file" accept=".csv,text/csv"><span class="upload-icon">⇧</span><strong>拖入 CSV 或点击选择文件</strong><small>必要字段：ticket_id、created_at、content</small></label>
+        <div class="panel-toolbar"><div><h2>账单导入</h2><p>支持 UTF-8 CSV，按交易编号自动去重。</p></div></div>
+        <label id="drop-zone" class="drop-zone"><input id="csv-file" type="file" accept=".csv,text/csv"><span class="upload-icon">⇧</span><strong>拖入账单 CSV 或点击选择文件</strong><small>必要字段：tx_id、paid_at、merchant、amount（可选 category、method、note）</small></label>
+        <label id="subs-drop-zone" class="drop-zone subs"><input id="subs-csv-file" type="file" accept=".csv,text/csv"><span class="upload-icon">↻</span><strong>同时导入订阅 CSV（可选）</strong><small>先在此选择订阅文件，再导入账单时将一并入库：name、merchant、expected_amount（可选 cycle）</small></label>
         <div id="import-progress" class="import-progress"></div>
-        <div class="section-subheading"><h3>最近导入</h3><button id="download-template">下载 CSV 模板</button></div>
+        <div class="section-subheading"><h3>最近导入</h3><div><button id="download-subs-template">下载订阅模板</button><button id="download-template">下载账单模板</button></div></div>
         <div class="table-card"><div class="table-scroll"><table><thead><tr><th>文件</th><th>时间</th><th>总行数</th><th>成功</th><th>重复</th><th>失败</th><th>状态</th></tr></thead><tbody id="import-rows"></tbody></table></div></div>
       </section>
 
@@ -132,7 +133,7 @@
 
       <section id="evaluations-panel" class="panel">
         <div class="panel-toolbar"><div><h2>自动评测</h2><p>同时查看确定性路由消融与真实模型端到端质量，不再用固定 20/80/100 代替模型表现。</p></div><button id="refresh-evaluations" class="secondary">刷新报告</button></div>
-        <div class="eval-notice"><div><strong>两层评测</strong><span>路由回归零成本；Live E2E 会通过 Skills、MCP、Policy 和 Harness 发起真实 OpenRouter 调用。</span></div><div><code>python -m minimal_agent.eval --variant compare</code><code>python -m minimal_agent.live_eval --limit 3 --confirm-live</code></div></div>
+        <div class="eval-notice"><div><strong>两层评测</strong><span>路由回归零成本；Live E2E 会通过 Skills、MCP、Policy 和 Harness 发起真实 OpenRouter 调用。</span></div><div><code>python -m billguard.eval --variant compare</code><code>python -m billguard.live_eval --limit 3 --confirm-live</code></div></div>
         <div id="evaluation-list" class="evaluation-list"></div>
       </section>
 
@@ -142,8 +143,8 @@
       </section>
     </main>
   </div>
-  <div id="workflow-modal" class="modal" aria-hidden="true"><div class="modal-backdrop" data-close-modal="workflow"></div><section class="modal-dialog"><div class="modal-head"><div><small id="workflow-ticket">反馈处理</small><h2>更新处理信息</h2></div><button data-close-modal="workflow">×</button></div><div class="form-grid"><label>处理状态<select id="workflow-status"><option>待处理</option><option>处理中</option><option>已完成</option></select></label><label>优先级<select id="workflow-priority"><option value="urgent">紧急</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option></select></label><label class="full">负责人<input id="workflow-assignee" placeholder="姓名或团队"></label><label class="full">内部备注<textarea id="workflow-notes" rows="4" placeholder="记录处理进展和结论"></textarea></label></div><div class="modal-subheading">处理记录</div><div id="workflow-audits" class="audit-list compact"></div><div class="modal-actions"><button data-close-modal="workflow" class="secondary">取消</button><button id="save-workflow" class="primary">保存</button></div></section></div>
-  <div id="tag-modal" class="modal" aria-hidden="true"><div class="modal-backdrop" data-close-modal="tag"></div><section class="modal-dialog"><div class="modal-head"><div><small>TAG RULE</small><h2 id="tag-modal-title">新建标签</h2></div><button data-close-modal="tag">×</button></div><input id="tag-rule-id" type="hidden"><div class="form-grid"><label class="full">标签名称<input id="tag-rule-name" placeholder="例如：物流问题"></label><label class="full">匹配关键词<textarea id="tag-rule-keywords" rows="5" placeholder="多个关键词用逗号分隔"></textarea></label><label class="switch-row full"><input id="tag-rule-enabled" type="checkbox" checked><span>启用自动匹配</span></label></div><div class="modal-actions"><button id="delete-tag-rule" class="danger">删除标签</button><span class="modal-spacer"></span><button data-close-modal="tag" class="secondary">取消</button><button id="save-tag-rule" class="primary">保存规则</button></div></section></div>
+  <div id="workflow-modal" class="modal" aria-hidden="true"><div class="modal-backdrop" data-close-modal="workflow"></div><section class="modal-dialog"><div class="modal-head"><div><small id="workflow-tx">交易核查</small><h2>更新核查信息</h2></div><button data-close-modal="workflow">×</button></div><div class="form-grid"><label>核查状态<select id="workflow-status"><option>正常</option><option>待核查</option><option>核查中</option><option>已确认</option><option>已忽略</option></select></label><label class="full">备注<textarea id="workflow-note" rows="4" maxlength="200" placeholder="记录核查进展和结论（最长 200 字）"></textarea></label></div><div class="modal-subheading">核查记录</div><div id="workflow-audits" class="audit-list compact"></div><div class="modal-actions"><button data-close-modal="workflow" class="secondary">取消</button><button id="save-workflow" class="primary">保存</button></div></section></div>
+  <div id="category-modal" class="modal" aria-hidden="true"><div class="modal-backdrop" data-close-modal="category"></div><section class="modal-dialog"><div class="modal-head"><div><small>CATEGORY RULE</small><h2 id="category-modal-title">新建类别</h2></div><button data-close-modal="category">×</button></div><input id="category-rule-id" type="hidden"><div class="form-grid"><label class="full">类别名称<input id="category-rule-name" placeholder="例如：宠物"></label><label class="full">匹配关键词<textarea id="category-rule-keywords" rows="5" placeholder="多个关键词用逗号分隔"></textarea></label><label class="switch-row full"><input id="category-rule-enabled" type="checkbox" checked><span>启用自动归类</span></label></div><div class="modal-actions"><button id="delete-category-rule" class="danger">删除类别</button><span class="modal-spacer"></span><button data-close-modal="category" class="secondary">取消</button><button id="save-category-rule" class="primary">保存规则</button></div></section></div>
   <div id="toast" role="status"></div>
   <script src="/app.js"></script>
 </body>

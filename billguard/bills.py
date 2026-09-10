@@ -696,6 +696,46 @@ class BillService:
                 "SELECT * FROM tx_audits WHERE tx_id=? ORDER BY id LIMIT ?",
                 (tx_id, min(max(1, limit), 200)))]
 
+    def recent_audits(self, limit: int = 50) -> list[dict[str, Any]]:
+        """最近的全量审计记录(类别规则 / 核查状态 / 订阅),供看板展示。"""
+        with self._connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM tx_audits ORDER BY id DESC LIMIT ?",
+                (min(max(1, limit), 200),))]
+
+    def imports(self, limit: int = 20) -> list[dict[str, Any]]:
+        """最近导入批次;账单与订阅 CSV 共用 imports 表。"""
+        with self._connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM imports ORDER BY id DESC LIMIT ?",
+                (min(max(1, limit), 100),))]
+
+    def update_transaction_category(self, tx_id: str, category: str,
+                                    operator: str = "web-user") -> dict[str, Any]:
+        """人工改判单笔交易的类别;类别不存在则即时创建,并写入审计。"""
+        tx_id = str(tx_id).strip()
+        category = str(category).strip()[:40]
+        if not tx_id or not category:
+            raise ToolError("tx_id 和 category 不能为空")
+        now = _now()
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT t.tx_id, COALESCE(c.name, '未分类') AS category FROM transactions t
+                   LEFT JOIN categories c ON c.id=t.category_id WHERE t.tx_id=?""",
+                (tx_id,)).fetchone()
+            if not row:
+                raise ToolError(f"交易不存在:{tx_id}")
+            category_id = self._ensure_category(db, category, now)
+            db.execute("UPDATE transactions SET category_id=? WHERE tx_id=?", (category_id, tx_id))
+            db.execute(
+                """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at)
+                   VALUES (?, 'category', ?, ?, ?)""",
+                (tx_id, operator,
+                 json.dumps({"old_category": row["category"], "new_category": category,
+                             "source": "manual"}, ensure_ascii=False), now))
+        return {"tx_id": tx_id, "old_category": row["category"], "new_category": category,
+                "operator": operator}
+
     def subscriptions(self) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute(

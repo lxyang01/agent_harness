@@ -45,7 +45,7 @@ class LiveEvaluationTests(unittest.TestCase):
     def test_trace_scorer_accepts_safe_checkpoint_without_committing(self):
         case = LiveEvalCase(
             id="approval", category="approval", input="创建高优先级工单",
-            expected_skills=("executive-report",),
+            expected_skills=("monthly-guard-report",),
             required_tools=("work-items.prepare_issue", "work-items.commit_issue"),
             required_sequence=("work-items.prepare_issue", "work-items.commit_issue"),
             forbidden_tools=(), expected_status="approval_pending",
@@ -54,7 +54,7 @@ class LiveEvaluationTests(unittest.TestCase):
             ),), numeric_grounding=False,
         )
         events = [
-            RunEvent("skill_activated", "trace", "session", data={"skill": "executive-report"}),
+            RunEvent("skill_activated", "trace", "session", data={"skill": "monthly-guard-report"}),
             RunEvent("tool_start", "trace", "session", step=1, data={
                 "tool": "work-items.prepare_issue", "arguments": {"priority": "high"},
             }),
@@ -92,16 +92,16 @@ class LiveEvaluationTests(unittest.TestCase):
     def test_numeric_grounding_detects_unsupported_claim(self):
         case = LiveEvalCase(
             id="grounding", category="triage", input="给我概览",
-            expected_skills=("feedback-triage",), required_tools=("feedback.aggregate",),
-            required_sequence=("feedback.aggregate",), forbidden_tools=(),
+            expected_skills=("bill-triage",), required_tools=("bill.aggregate",),
+            required_sequence=("bill.aggregate",), forbidden_tools=(),
             expected_status="completed", argument_rules=(),
         )
         events = [
-            RunEvent("skill_activated", "trace", "session", data={"skill": "feedback-triage"}),
+            RunEvent("skill_activated", "trace", "session", data={"skill": "bill-triage"}),
             RunEvent("tool_start", "trace", "session", step=1,
-                     data={"tool": "feedback.aggregate", "arguments": {}}),
+                     data={"tool": "bill.aggregate", "arguments": {}}),
             RunEvent("tool_end", "trace", "session", step=1,
-                     data={"tool": "feedback.aggregate", "result": {"total": 20}, "latency_ms": 1}),
+                     data={"tool": "bill.aggregate", "result": {"total": 20}, "latency_ms": 1}),
         ]
         response = AgentResponse("共有20条，其中99条需要关注。", 2, "trace")
         result = score_live_run(case, response, events)
@@ -123,20 +123,20 @@ class LiveEvaluationTests(unittest.TestCase):
         case = LiveEvalCase(
             id="evidence", category="root_cause", input="分析原因",
             expected_skills=("root-cause-analysis",),
-            required_tools=("feedback.get_samples",),
-            required_sequence=("feedback.get_samples",), forbidden_tools=(),
+            required_tools=("bill.get_samples",),
+            required_sequence=("bill.get_samples",), forbidden_tools=(),
             expected_status="completed", argument_rules=(), numeric_grounding=False,
-            evidence_tools=("feedback.get_samples",), check_causal_claims=True,
+            evidence_tools=("bill.get_samples",), check_causal_claims=True,
         )
         events = [
             RunEvent("skill_activated", "trace", "session", data={
                 "skill": "root-cause-analysis",
             }),
             RunEvent("tool_start", "trace", "session", step=1, data={
-                "tool": "feedback.get_samples", "arguments": {"query": "支付问题"},
+                "tool": "bill.get_samples", "arguments": {"query": "支付问题"},
             }),
             RunEvent("tool_end", "trace", "session", step=1, data={
-                "tool": "feedback.get_samples",
+                "tool": "bill.get_samples",
                 "result": {"matched": 0, "samples": []}, "latency_ms": 1,
             }),
         ]
@@ -154,20 +154,20 @@ class LiveEvaluationTests(unittest.TestCase):
         case = LiveEvalCase(
             id="evidence", category="root_cause", input="分析原因",
             expected_skills=("root-cause-analysis",),
-            required_tools=("feedback.get_samples",),
-            required_sequence=("feedback.get_samples",), forbidden_tools=(),
+            required_tools=("bill.get_samples",),
+            required_sequence=("bill.get_samples",), forbidden_tools=(),
             expected_status="completed", argument_rules=(), numeric_grounding=False,
-            evidence_tools=("feedback.get_samples",), check_causal_claims=True,
+            evidence_tools=("bill.get_samples",), check_causal_claims=True,
         )
         events = [
             RunEvent("skill_activated", "trace", "session", data={
                 "skill": "root-cause-analysis",
             }),
             RunEvent("tool_start", "trace", "session", step=1, data={
-                "tool": "feedback.get_samples", "arguments": {"tag": "支付问题"},
+                "tool": "bill.get_samples", "arguments": {"tag": "支付问题"},
             }),
             RunEvent("tool_end", "trace", "session", step=1, data={
-                "tool": "feedback.get_samples",
+                "tool": "bill.get_samples",
                 "result": {"matched": 1, "samples": [{"ticket_id": "TK-1"}]},
                 "latency_ms": 1,
             }),
@@ -184,13 +184,13 @@ class LiveEvaluationTests(unittest.TestCase):
     def test_report_structure_is_part_of_task_success(self):
         case = LiveEvalCase(
             id="report", category="report", input="生成报告",
-            expected_skills=("executive-report",), required_tools=(),
+            expected_skills=("monthly-guard-report",), required_tools=(),
             required_sequence=(), forbidden_tools=(), expected_status="completed",
             argument_rules=(), numeric_grounding=False,
             required_sections=("执行摘要", "数据事实", "行动建议", "数据局限"),
         )
         events = [RunEvent("skill_activated", "trace", "session", data={
-            "skill": "executive-report",
+            "skill": "monthly-guard-report",
         })]
         result = score_live_run(
             case, AgentResponse("### 执行摘要\n只有摘要", 1, "trace"), events,
@@ -204,12 +204,12 @@ class LiveEvaluationTests(unittest.TestCase):
     def test_transport_failure_is_not_reported_as_agent_quality_zero(self):
         case = LiveEvalCase(
             id="infra", category="triage", input="概览",
-            expected_skills=("feedback-triage",), required_tools=("feedback.aggregate",),
-            required_sequence=("feedback.aggregate",), forbidden_tools=(),
+            expected_skills=("bill-triage",), required_tools=("bill.aggregate",),
+            required_sequence=("bill.aggregate",), forbidden_tools=(),
             expected_status="completed", argument_rules=(),
         )
         events = [
-            RunEvent("skill_activated", "trace", "session", data={"skill": "feedback-triage"}),
+            RunEvent("skill_activated", "trace", "session", data={"skill": "bill-triage"}),
             RunEvent("run_error", "trace", "session", data={
                 "error": "LLM request failed: TLS EOF",
             }),

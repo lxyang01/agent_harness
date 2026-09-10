@@ -18,12 +18,13 @@ def _read_password(args: argparse.Namespace, confirm: bool) -> str:
 
 
 def _store(args: argparse.Namespace) -> UserStore:
-    return UserStore(Path(args.data_dir) / "auth")
+    # 与 web.serve() 保持同一子树:<data-dir>/billguard/auth
+    return UserStore(Path(args.data_dir) / "billguard" / "auth")
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Feedback Lens 用户管理")
-    parser.add_argument("--data-dir", default=".sessions", help="认证数据目录")
+    parser = argparse.ArgumentParser(description="BillGuard 用户管理")
+    parser.add_argument("--data-dir", default=".sessions", help="数据目录(认证库位于 billguard/auth 子目录)")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     add = subparsers.add_parser("add", help="创建用户")

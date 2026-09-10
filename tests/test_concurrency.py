@@ -13,7 +13,7 @@ from billguard.auth import User
 from billguard.policy import ApprovalStore, PolicyError, PolicyGateway, ToolPolicy
 from billguard.session import SessionStore
 from billguard.tools import Tool, ToolRegistry
-from billguard.web import BusyError, FeedbackWebApp
+from billguard.web import BusyError, BillGuardApp
 from billguard.work_items import WorkItemError, WorkItemStore
 
 
@@ -126,8 +126,8 @@ class SessionLockRaceTests(unittest.TestCase):
             manager.register_tools = lambda registry, name: original_register(
                 registry, name, store=manager_store)
 
-            app = FeedbackWebApp(root / "web", root / "docs", llm, manager,
-                                 gateway, work_items)
+            app = BillGuardApp(root / "web", root / "docs", llm, manager,
+                               gateway, work_items)
             alice = User("alice", "approver")
 
             # 准备:第一次 chat 触发 high_write 暂停,产生 pending 审批
@@ -154,7 +154,7 @@ class SessionLockRaceTests(unittest.TestCase):
             self.assertIsNone(chat_result.get("error"))
             self.assertEqual("completed", chat_result["response"]["status"])
             self.assertEqual("completed", decision["status"])
-            session = SessionStore(root / "web" / "feedback_sessions").load("s")
+            session = SessionStore(root / "web" / "billguard" / "sessions").load("s")
             contents = [message.content for message in session.messages]
             self.assertTrue(any("慢速回答" in content for content in contents),
                             f"chat 结果丢失: {contents}")
@@ -195,8 +195,8 @@ class LlmSemaphoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             llm = _BlockingLLM()
-            app = FeedbackWebApp(root / "web", root / "docs", llm, _BillReadManager(),
-                                 max_concurrent_llm=1)
+            app = BillGuardApp(root / "web", root / "docs", llm, _BillReadManager(),
+                               max_concurrent_llm=1)
             alice = User("alice", "approver")
             result: dict[str, Any] = {}
 

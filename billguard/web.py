@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from .agents import FeedbackMockLLM, create_feedback_agent, create_mcp_feedback_agent
+from .agents import BillMockLLM, create_bill_agent, create_mcp_bill_agent
 from .auth import (AuthError, PermissionDenied, can, clear_session_cookie,
                    session_cookie)
 from .auth import AuthSessionStore, Authenticator, UserStore
-from .feedback import FeedbackFilters, FeedbackService
+from .bills import WORKFLOW_STATUSES, BillFilters, BillService
 from .guardrails import MAX_HTTP_REQUEST_BYTES, validate_user_input
 from .evaluation import EvaluationReportStore
 from .llm import OpenAICompatibleLLM
@@ -34,8 +34,8 @@ class BusyError(RuntimeError):
     """429: all model-concurrency slots are taken; retry shortly."""
 
 
-class FeedbackWebApp:
-    """Customer feedback insight service shared by the HTTP handler and tests."""
+class BillGuardApp:
+    """BillGuard 账单守卫应用层,供 HTTP handler 与测试共用。"""
 
     def __init__(self, data_dir: str | Path, docs_dir: str | Path, llm: Any,
                  mcp_manager: MCPClientManager | None = None,
@@ -46,10 +46,11 @@ class FeedbackWebApp:
         if max_concurrent_llm < 1:
             raise ValueError("max_concurrent_llm must be >= 1")
         self.data_dir = Path(data_dir)
-        self.session_dir = self.data_dir / "feedback_sessions"
-        self.evidence_dir = self.data_dir / "feedback_evidence"
+        guard_root = self.data_dir / "billguard"
+        self.session_dir = guard_root / "sessions"
+        self.evidence_dir = guard_root / "evidence"
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
-        self.feedback = FeedbackService(self.data_dir / "feedback")
+        self.bills = BillService(guard_root / "bills")
         self.traces = TraceStore(self.session_dir)
         self.evaluations = EvaluationReportStore(self.data_dir / "evaluations")
         self.llm = llm
@@ -101,13 +102,14 @@ class FeedbackWebApp:
             "messages": messages,
             "summary": session.summary,
             "sessions": self.list_sessions(user, session_id),
-            "overview": self.feedback.overview(),
-            "anomalies": self.feedback.anomalies(),
-            "feedback": self.feedback.query(page=1, page_size=30),
-            "tags": self.feedback.tags(),
-            "tag_audits": self.feedback.tag_rule_audits(),
-            "imports": self.feedback.imports(),
-            "reports": self.feedback.reports(),
+            "overview": self.bills.overview(),
+            "anomalies": self.bills.anomalies(31, "spike", 8),
+            "bills": self.bills.query(page=1, page_size=30),
+            "categories": self.bills.categories(),
+            "audits": self.bills.recent_audits(),
+            "imports": self.bills.imports(),
+            "subscriptions": self.bills.subscriptions(),
+            "reports": self.bills.reports(),
             "mcp_servers": self.mcp_servers(),
             "approvals": self.approvals(user, session_id),
             "runs": self.traces.list_runs(session_id),
@@ -183,7 +185,7 @@ class FeedbackWebApp:
                 "trace_id": response.trace_id,
                 "active_skills": list(response.active_skills),
                 "sessions": self.list_sessions(user, session_id),
-                "overview": self.feedback.overview(),
+                "overview": self.bills.overview(),
                 "evidence": evidence,
                 "mcp_servers": self.mcp_servers(),
                 "status": response.status,
@@ -206,8 +208,8 @@ class FeedbackWebApp:
 
     def _agent(self, session_id: str):
         if self.mcp_manager is None:
-            return create_feedback_agent(self.llm, session_id, self.session_dir, self.feedback)
-        return create_mcp_feedback_agent(
+            return create_bill_agent(self.llm, session_id, self.session_dir, self.bills)
+        return create_mcp_bill_agent(
             self.llm, session_id, self.mcp_manager, self.session_dir,
             policy_gateway=self.policy_gateway,
         )
@@ -266,7 +268,7 @@ class FeedbackWebApp:
                 "approval": self.policy_gateway.store.get(decided.id).as_dict(),
                 "approvals": self.approvals(user, session_id),
                 "sessions": self.list_sessions(user, session_id),
-                "overview": self.feedback.overview(),
+                "overview": self.bills.overview(),
                 "evidence": evidence,
                 "mcp_servers": self.mcp_servers(),
                 "runs": self.traces.list_runs(session_id),
@@ -302,23 +304,22 @@ class FeedbackWebApp:
         for event in events:
             if getattr(event, "event_type", "") != "tool_end":
                 continue
-            tool = event.data.get("tool")
+            tool = str(event.data.get("tool") or "")
+            leaf = tool.rsplit(".", 1)[-1]  # MCP 工具带 "bill." 前缀
             result = event.data.get("result", {})
-            if tool in {"feedback_overview", "feedback_anomalies"}:
-                source = result.get("top_tags", []) if tool == "feedback_overview" else result.get("items", [])
-                for item in source[:8]:
-                    count = item.get("count", item.get("current_count", 0))
-                    evidence.append({"label": item.get("name", "问题标签"), "description": f"{count} 条相关反馈",
-                                     "filters": {"tag": item.get("name", "")}})
-            elif tool == "feedback_compare":
+            if tool == "bill_overview" or leaf == "aggregate":
+                for item in result.get("by_category", [])[:8]:
+                    evidence.append({"label": item.get("name", "类别"), "description": f"¥{item.get('amount', 0):g} · {item.get('count', 0)} 笔",
+                                     "filters": {"category": item.get("name", "")}})
+            elif tool == "bill_compare" or leaf == "compare_periods":
                 period = result.get("current_period", {})
-                evidence.append({"label": "查看本周期反馈", "description": f"{period.get('total', 0)} 条",
+                evidence.append({"label": "查看本周期支出", "description": f"¥{period.get('total', 0):g}",
                                  "filters": {"date_from": period.get("from", ""), "date_to": period.get("to", "")}})
-            elif tool in {"feedback_samples", "feedback_search"}:
+            elif tool in {"bill_search", "bill_samples"} or leaf in {"query", "get_samples"}:
                 source = result.get("samples", result.get("items", []))
                 for item in source[:10]:
-                    evidence.append({"label": item.get("ticket_id", "查看反馈"), "description": item.get("product_module", "原始反馈"),
-                                     "filters": {"query": item.get("ticket_id", "")}})
+                    evidence.append({"label": item.get("merchant", "查看交易"), "description": f"¥{item.get('amount', 0):g}",
+                                     "filters": {"merchant": item.get("merchant", "")}})
         unique: list[dict[str, Any]] = []
         seen: set[str] = set()
         for item in evidence:
@@ -329,83 +330,102 @@ class FeedbackWebApp:
         return unique[:12]
 
     @staticmethod
-    def _filters(body: dict[str, Any]) -> FeedbackFilters:
+    def _filters(body: dict[str, Any]) -> BillFilters:
         source = body.get("filters", body)
-        allowed = FeedbackFilters.__dataclass_fields__
-        return FeedbackFilters(**{key: value for key, value in source.items() if key in allowed and value not in (None, "")})
+        allowed = BillFilters.__dataclass_fields__
+        return BillFilters(**{key: value for key, value in source.items() if key in allowed and value not in (None, "")})
 
-    def feedback_overview(self, body: dict[str, Any]) -> dict[str, Any]:
-        return self.feedback.overview(self._filters(body))
+    def bill_overview(self, body: dict[str, Any]) -> dict[str, Any]:
+        return self.bills.overview(self._filters(body))
 
-    def feedback_query(self, body: dict[str, Any]) -> dict[str, Any]:
-        return self.feedback.query(
+    def bill_query(self, body: dict[str, Any]) -> dict[str, Any]:
+        return self.bills.query(
             self._filters(body),
             int(body.get("page", 1)),
             int(body.get("page_size", 30)),
         )
 
-    def feedback_anomalies(self, body: dict[str, Any]) -> dict[str, Any]:
-        return self.feedback.anomalies(
-            int(body.get("days", 7)), str(body.get("dimension", "tag")), int(body.get("limit", 10))
+    def bill_anomalies(self, body: dict[str, Any]) -> dict[str, Any]:
+        return self.bills.anomalies(
+            int(body.get("days", 31)), str(body.get("dimension", "spike")), int(body.get("limit", 8))
         )
 
-    def import_feedback(self, body: dict[str, Any]) -> dict[str, Any]:
-        filename = str(body.get("filename", "feedback.csv")).strip() or "feedback.csv"
+    def import_bills(self, body: dict[str, Any]) -> dict[str, Any]:
+        filename = str(body.get("filename", "bills.csv")).strip() or "bills.csv"
         csv_text = body.get("csv_text")
         if not isinstance(csv_text, str):
             raise ValueError("csv_text is required")
-        result = self.feedback.import_csv(filename, csv_text)
-        return {"result": result, "overview": self.feedback.overview(), "imports": self.feedback.imports()}
+        result = self.bills.import_bills(filename, csv_text)
+        payload: dict[str, Any] = {
+            "result": result,
+            "overview": self.bills.overview(),
+            "imports": self.bills.imports(),
+            "subscriptions": self.bills.subscriptions(),
+        }
+        subscriptions_csv_text = body.get("subscriptions_csv_text")
+        if isinstance(subscriptions_csv_text, str) and subscriptions_csv_text.strip():
+            payload["subscriptions_result"] = self.bills.import_subscriptions(
+                str(body.get("subscriptions_filename", "subscriptions.csv")).strip() or "subscriptions.csv",
+                subscriptions_csv_text,
+            )
+        return payload
 
-    def update_feedback_tags(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
-        ticket_id = str(body.get("ticket_id", "")).strip()
-        tags = body.get("tags", [])
-        if not ticket_id or not isinstance(tags, list):
-            raise ValueError("ticket_id and tags are required")
-        result = self.feedback.update_tags(ticket_id, [str(tag) for tag in tags], user.username)
-        return {"result": result, "tags": self.feedback.tags()}
+    def update_transaction_category(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
+        tx_id = str(body.get("tx_id", "")).strip()
+        category = str(body.get("category", "")).strip()
+        if not tx_id or not category:
+            raise ValueError("tx_id and category are required")
+        result = self.bills.update_transaction_category(tx_id, category, user.username)
+        return {"result": result, "categories": self.bills.categories(), "audits": self.bills.recent_audits()}
 
-    def save_tag_rule(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
+    def save_category(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
         keywords = body.get("keywords", [])
         if not isinstance(keywords, list):
             raise ValueError("keywords must be an array")
-        result = self.feedback.save_tag_rule(
+        result = self.bills.save_category(
             str(body.get("name", "")), [str(item) for item in keywords], bool(body.get("enabled", True)),
-            int(body["tag_id"]) if body.get("tag_id") is not None else None, user.username,
+            int(body["category_id"]) if body.get("category_id") is not None else None, user.username,
         )
-        return {"result": result, "tags": self.feedback.tags(), "audits": self.feedback.tag_rule_audits()}
+        return {"result": result, "categories": self.bills.categories(), "audits": self.bills.recent_audits()}
 
-    def delete_tag_rule(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
-        result = self.feedback.delete_tag_rule(int(body.get("tag_id", 0)), user.username)
-        return {"result": result, "tags": self.feedback.tags(), "audits": self.feedback.tag_rule_audits()}
+    def delete_category(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
+        result = self.bills.delete_category(int(body.get("category_id", 0)), user.username)
+        return {"result": result, "categories": self.bills.categories(), "audits": self.bills.recent_audits()}
 
-    def rematch_tags(self) -> dict[str, Any]:
-        result = self.feedback.rematch_tags()
-        return {"result": result, "tags": self.feedback.tags(), "overview": self.feedback.overview()}
+    def rematch_categories(self) -> dict[str, Any]:
+        result = self.bills.rematch_categories()
+        return {"result": result, "categories": self.bills.categories(), "overview": self.bills.overview()}
 
     def update_workflow(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
-        ticket_ids = body.get("ticket_ids", [])
+        tx_ids = body.get("tx_ids", [])
         updates = body.get("updates", {})
-        if not isinstance(ticket_ids, list) or not isinstance(updates, dict):
-            raise ValueError("ticket_ids and updates are required")
+        if not isinstance(tx_ids, list) or not isinstance(updates, dict):
+            raise ValueError("tx_ids and updates are required")
         updates.pop("operator", None)  # 身份一律取服务端,防止与 kwarg 冲突
-        return self.feedback.update_workflow(ticket_ids, user.username, **updates)
+        status = str(updates.get("status") or "").strip()
+        note = str(updates.get("note") or "").strip()
+        if status not in WORKFLOW_STATUSES:
+            raise ValueError(f"status 必须是{'、'.join(WORKFLOW_STATUSES)}")
+        if len(note) > 200:
+            raise ValueError("备注最长 200 字")
+        return self.bills.update_workflow(
+            [str(item) for item in tx_ids], operator=user.username, status=status, note=note)
 
-    def feedback_audits(self, body: dict[str, Any]) -> dict[str, Any]:
-        ticket_id = str(body.get("ticket_id", "")).strip()
-        return {"audits": self.feedback.feedback_audits(ticket_id)}
+    def transaction_audits(self, body: dict[str, Any]) -> dict[str, Any]:
+        tx_id = str(body.get("tx_id", "")).strip()
+        return {"audits": self.bills.transaction_audits(tx_id)}
 
-    def export_feedback(self, body: dict[str, Any]) -> dict[str, Any]:
-        return {"filename": "feedback-export.csv", "csv_text": self.feedback.export_csv(self._filters(body))}
+    def export_bills(self, body: dict[str, Any]) -> dict[str, Any]:
+        return {"filename": "bills-export.csv", "csv_text": self.bills.export_csv(self._filters(body))}
 
     def save_report(self, user: Any, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
         self._require_session_access(user, session_id)
-        report = self.feedback.save_report(session_id, str(body.get("title", "")), str(body.get("content", "")))
-        return {"report": report, "reports": self.feedback.reports()}
+        report = self.bills.save_report(session_id, str(body.get("title", "")), str(body.get("content", "")))
+        return {"report": report, "reports": self.bills.reports()}
 
     def delete_report(self, body: dict[str, Any]) -> dict[str, Any]:
-        result = self.feedback.delete_report(int(body.get("report_id", 0)))
-        return {"result": result, "reports": self.feedback.reports()}
+        result = self.bills.delete_report(int(body.get("report_id", 0)))
+        return {"result": result, "reports": self.bills.reports()}
 
     def delete_session(self, user: Any, session_id: str) -> dict[str, Any]:
         """Delete all persisted state owned by one exact session id."""
@@ -461,19 +481,19 @@ class FeedbackWebApp:
                          "disabled": updated.disabled}}
 
 
-# Backward-compatible import for callers of the earlier PlanningAgent UI.
-PlanningWebApp = FeedbackWebApp
+# 过渡别名(Task 8 统一移除):保留一行让遗漏引用在 Task 8 的 grep 中集中暴露。
+FeedbackWebApp = BillGuardApp
 
 _AUTH_EXEMPT_POST = {"/api/auth/login"}
 _CAPABILITY_BY_PATH = {
     "/api/reports/save": "report_write",
     "/api/reports/delete": "report_write",
-    "/api/feedback/import": "feedback_write",
-    "/api/feedback/tags": "feedback_write",
-    "/api/tag-rules/save": "feedback_write",
-    "/api/tag-rules/delete": "feedback_write",
-    "/api/tag-rules/rematch": "feedback_write",
-    "/api/feedback/workflow": "feedback_write",
+    "/api/bills/import": "feedback_write",
+    "/api/bills/categories": "feedback_write",
+    "/api/category-rules/save": "feedback_write",
+    "/api/category-rules/delete": "feedback_write",
+    "/api/category-rules/rematch": "feedback_write",
+    "/api/bills/workflow": "feedback_write",
     "/api/approvals/decide": "approval_decide",
     "/api/admin/users": "users_manage",
     "/api/admin/users/role": "users_manage",
@@ -482,9 +502,9 @@ _CAPABILITY_BY_PATH = {
 }
 
 
-def make_handler(app: FeedbackWebApp) -> type[BaseHTTPRequestHandler]:
+def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "PlanningAgent/1.0"
+        server_version = "BillGuard/1.0"
 
         def log_message(self, fmt: str, *args: Any) -> None:
             print(f"[web] {self.address_string()} - {fmt % args}")
@@ -592,28 +612,28 @@ def make_handler(app: FeedbackWebApp) -> type[BaseHTTPRequestHandler]:
                     if not message:
                         raise ValueError("message is required")
                     result = app.chat(user, session_id, message)
-                elif self.path == "/api/feedback/overview":
-                    result = app.feedback_overview(body)
-                elif self.path == "/api/feedback/query":
-                    result = app.feedback_query(body)
-                elif self.path == "/api/feedback/anomalies":
-                    result = app.feedback_anomalies(body)
-                elif self.path == "/api/feedback/import":
-                    result = app.import_feedback(body)
-                elif self.path == "/api/feedback/tags":
-                    result = app.update_feedback_tags(user, body)
-                elif self.path == "/api/tag-rules/save":
-                    result = app.save_tag_rule(user, body)
-                elif self.path == "/api/tag-rules/delete":
-                    result = app.delete_tag_rule(user, body)
-                elif self.path == "/api/tag-rules/rematch":
-                    result = app.rematch_tags()
-                elif self.path == "/api/feedback/workflow":
+                elif self.path == "/api/bills/overview":
+                    result = app.bill_overview(body)
+                elif self.path == "/api/bills/query":
+                    result = app.bill_query(body)
+                elif self.path == "/api/bills/anomalies":
+                    result = app.bill_anomalies(body)
+                elif self.path == "/api/bills/import":
+                    result = app.import_bills(body)
+                elif self.path == "/api/bills/categories":
+                    result = app.update_transaction_category(user, body)
+                elif self.path == "/api/category-rules/save":
+                    result = app.save_category(user, body)
+                elif self.path == "/api/category-rules/delete":
+                    result = app.delete_category(user, body)
+                elif self.path == "/api/category-rules/rematch":
+                    result = app.rematch_categories()
+                elif self.path == "/api/bills/workflow":
                     result = app.update_workflow(user, body)
-                elif self.path == "/api/feedback/audits":
-                    result = app.feedback_audits(body)
-                elif self.path == "/api/feedback/export":
-                    result = app.export_feedback(body)
+                elif self.path == "/api/bills/audits":
+                    result = app.transaction_audits(body)
+                elif self.path == "/api/bills/export":
+                    result = app.export_bills(body)
                 elif self.path == "/api/reports/save":
                     result = app.save_report(user, session_id, body)
                 elif self.path == "/api/reports/delete":
@@ -660,25 +680,25 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
           mcp_timeout: float = 20.0, work_item_mcp_url: str = "",
           work_item_data_dir: str = ".sessions/work-items",
           llm_proxy: str | None = None, max_concurrent_llm: int = 4) -> None:
-    llm = (FeedbackMockLLM() if llm_name == "mock" else
+    llm = (BillMockLLM() if llm_name == "mock" else
            OpenAICompatibleLLM(model, base_url=base_url, proxy=llm_proxy))
     mcp_manager: MCPClientManager | None = None
     if tool_source == "mcp":
         mcp_manager = MCPClientManager(request_timeout=mcp_timeout)
         project_root = Path(__file__).resolve().parent.parent
-        feedback_dir = (Path(data_dir) / "feedback").resolve()
+        bills_dir = (Path(data_dir) / "billguard" / "bills").resolve()
         mcp_manager.connect_stdio(
-            "feedback",
+            "bill",
             sys.executable,
             ["-u", "-m", "billguard.mcp_servers.bill_server",
-             "--data-dir", str(feedback_dir)],
+             "--data-dir", str(bills_dir)],
             cwd=project_root,
         )
         if work_item_mcp_url:
             mcp_manager.connect_streamable_http("work-items", work_item_mcp_url)
-    policy_gateway = PolicyGateway(ApprovalStore(Path(data_dir) / "policy")) if mcp_manager else None
+    policy_gateway = PolicyGateway(ApprovalStore(Path(data_dir) / "billguard" / "policy")) if mcp_manager else None
     work_item_store = WorkItemStore(work_item_data_dir) if work_item_mcp_url else None
-    auth_root = Path(data_dir) / "auth"
+    auth_root = Path(data_dir) / "billguard" / "auth"
     users_store = UserStore(auth_root)
     if users_store.count() == 0:
         print("用户库为空,请先创建管理员:")
@@ -686,12 +706,12 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
         raise SystemExit(1)
     authenticator = Authenticator(users_store, AuthSessionStore(auth_root))
     server = ThreadingHTTPServer(
-        (host, port), make_handler(FeedbackWebApp(
+        (host, port), make_handler(BillGuardApp(
             data_dir, docs_dir, llm, mcp_manager, policy_gateway, work_item_store,
             authenticator, max_concurrent_llm,
         )),
     )
-    print(f"Feedback Lens Web UI: http://{host}:{server.server_port}")
+    print(f"BillGuard Web UI: http://{host}:{server.server_port}")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
@@ -706,7 +726,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Feedback Lens customer insight Agent")
+    parser = argparse.ArgumentParser(description="BillGuard 账单守卫 Agent")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--data-dir", default=".sessions")

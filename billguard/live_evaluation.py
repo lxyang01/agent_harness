@@ -14,8 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .agents import create_mcp_feedback_agent
-from .feedback import FeedbackService
+from .agents import create_mcp_bill_agent
+from .bills import BillService
 from .harness import AgentResponse, RunEvent
 from .harness.contracts import output_sections_missing
 from .llm import LLM
@@ -408,6 +408,7 @@ def summarize_live_results(results: list[dict[str, Any]], case_count: int,
 
 
 def _shift_fixture_to_today(source: Path) -> str:
+    # 数据集仍是反馈域,待 T7 换成账单数据集后此函数随之迁移。
     rows = list(csv.DictReader(source.read_text(encoding="utf-8-sig").splitlines()))
     if not rows:
         raise ValueError("feedback fixture is empty")
@@ -445,17 +446,20 @@ class LiveEvaluationRunner:
         started = time.perf_counter()
         with tempfile.TemporaryDirectory(prefix="feedback-agent-live-eval-") as temp:
             root = Path(temp)
-            feedback_dir = root / "feedback"
+            bills_dir = root / "billguard" / "bills"
             work_item_dir = root / "work-items"
             sessions_dir = root / "sessions"
             fixture = self.project_root / "sample_data" / "customer_feedback_demo.csv"
             csv_text = _shift_fixture_to_today(fixture)
-            imported = FeedbackService(feedback_dir).import_csv(fixture.name, csv_text)
+            # 数据集仍是反馈域(待 T7);这里只统计行数作为报告元数据,
+            # 账单 MCP 侧初始化一个空库 + 默认类别即可支撑用例运行。
+            fixture_rows = sum(1 for _ in csv.DictReader(io.StringIO(csv_text)))
+            BillService(bills_dir)
             with MCPClientManager(request_timeout=self.request_timeout) as manager:
                 manager.connect_stdio(
                     "bill", sys.executable,
                     ["-u", "-m", "billguard.mcp_servers.bill_server",
-                     "--data-dir", str(feedback_dir), "--transport", "stdio"],
+                     "--data-dir", str(bills_dir), "--transport", "stdio"],
                     cwd=self.project_root,
                 )
                 manager.connect_stdio(
@@ -470,7 +474,7 @@ class LiveEvaluationRunner:
                 for repeat in range(1, repeats + 1):
                     for case in cases:
                         session_id = f"live-eval-{case.id}-r{repeat}"
-                        agent = create_mcp_feedback_agent(
+                        agent = create_mcp_bill_agent(
                             self.llm, session_id, manager, sessions_dir,
                             skill_dir=self.project_root / "skills", policy_gateway=gateway,
                         )
@@ -512,7 +516,7 @@ class LiveEvaluationRunner:
             "repeats": repeats,
             "fixture": "sample_data/customer_feedback_demo.csv (dates shifted to evaluation day)",
             "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
-            "fixture_rows": imported["imported_rows"],
+            "fixture_rows": fixture_rows,
             "duration_ms": round((time.perf_counter() - started) * 1000, 2),
             "planned_runs": len(cases) * repeats,
             "aborted": bool(aborted_reason),

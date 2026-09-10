@@ -12,7 +12,7 @@ from billguard.policy import ApprovalStore, PolicyError, PolicyGateway, ToolPoli
 from billguard.session import SessionStore
 from billguard.skills import SkillRuntime
 from billguard.tools import Tool, ToolRegistry
-from billguard.web import FeedbackWebApp
+from billguard.web import BillGuardApp
 from billguard.work_items import WorkItemStore
 
 
@@ -207,7 +207,7 @@ class WebApprovalTests(unittest.TestCase):
             ])
             gateway = PolicyGateway(ApprovalStore(root / "web" / "policy"))
             approver = User("approver", "approver")
-            app = FeedbackWebApp(
+            app = BillGuardApp(
                 root / "web", root / "docs", llm,
                 FakeWorkItemManager(work_items), gateway, work_items,
             )
