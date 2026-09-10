@@ -206,43 +206,46 @@ class FeedbackWebApp:
         decision = str(body.get("decision", "")).strip().lower()
         if not approval_id or decision not in {"approve", "reject"}:
             raise PolicyError("approval_id and decision (approve or reject) are required")
-        current = self.policy_gateway.store.get(approval_id)
-        if current.session_id != session_id:
-            raise PolicyError("approval does not belong to this session")
-        approved = decision == "approve"
-        decided_by = user.username  # 服务端身份,忽略请求体中的 decided_by
-        note = str(body.get("note", ""))
+        # 与 chat 共用同一把会话锁:审批恢复与进行中的对话都会加载并回写
+        # Session 文件,无锁并发会互相覆盖(丢失更新)。
+        with self._lock(session_id):
+            current = self.policy_gateway.store.get(approval_id)
+            if current.session_id != session_id:
+                raise PolicyError("approval does not belong to this session")
+            approved = decision == "approve"
+            decided_by = user.username  # 服务端身份,忽略请求体中的 decided_by
+            note = str(body.get("note", ""))
 
-        # The Work Item service owns a second, domain-level approval state. Keeping
-        # both gates means a forged Harness checkpoint still cannot create an issue.
-        if current.tool_name.endswith("commit_issue") and self.work_item_store is not None:
-            remote_approval_id = str(current.arguments.get("approval_id", "")).strip()
-            if not remote_approval_id:
-                raise PolicyError("commit_issue approval has no remote approval_id")
-            self.work_item_store.decide(remote_approval_id, approved, decided_by)
+            # The Work Item service owns a second, domain-level approval state. Keeping
+            # both gates means a forged Harness checkpoint still cannot create an issue.
+            if current.tool_name.endswith("commit_issue") and self.work_item_store is not None:
+                remote_approval_id = str(current.arguments.get("approval_id", "")).strip()
+                if not remote_approval_id:
+                    raise PolicyError("commit_issue approval has no remote approval_id")
+                self.work_item_store.decide(remote_approval_id, approved, decided_by)
 
-        decided = self.policy_gateway.store.decide(
-            approval_id, approved, decided_by, note,
-        )
-        agent = self._agent(session_id)
-        events: list[Any] = []
-        agent.hooks.append(events.append)
-        response = agent.resume(approval_id) if approved else agent.finalize_rejection(approval_id)
-        evidence = self._build_evidence(events)
-        self._save_evidence(session_id, response.answer, evidence)
-        return {
-            "answer": response.answer,
-            "steps": response.steps,
-            "trace_id": response.trace_id,
-            "status": response.status,
-            "approval": self.policy_gateway.store.get(decided.id).as_dict(),
-            "approvals": self.approvals(user, session_id),
-            "sessions": self.list_sessions(user, session_id),
-            "overview": self.feedback.overview(),
-            "evidence": evidence,
-            "mcp_servers": self.mcp_servers(),
-            "runs": self.traces.list_runs(session_id),
-        }
+            decided = self.policy_gateway.store.decide(
+                approval_id, approved, decided_by, note,
+            )
+            agent = self._agent(session_id)
+            events: list[Any] = []
+            agent.hooks.append(events.append)
+            response = agent.resume(approval_id) if approved else agent.finalize_rejection(approval_id)
+            evidence = self._build_evidence(events)
+            self._save_evidence(session_id, response.answer, evidence)
+            return {
+                "answer": response.answer,
+                "steps": response.steps,
+                "trace_id": response.trace_id,
+                "status": response.status,
+                "approval": self.policy_gateway.store.get(decided.id).as_dict(),
+                "approvals": self.approvals(user, session_id),
+                "sessions": self.list_sessions(user, session_id),
+                "overview": self.feedback.overview(),
+                "evidence": evidence,
+                "mcp_servers": self.mcp_servers(),
+                "runs": self.traces.list_runs(session_id),
+            }
 
     @staticmethod
     def _answer_key(answer: str) -> str:
