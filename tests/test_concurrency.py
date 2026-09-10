@@ -101,10 +101,10 @@ class _CommitManager:
              "required": ["approval_id"], "additionalProperties": False},
             store.commit_issue,
             policy=ToolPolicy("high_write", True, "Creates durable work item")))
-        # 默认 skill(feedback-triage)只信任反馈读工具;注册一个同名只读工具,
+        # 默认 skill(bill-triage)只信任账单读工具;注册一个同名只读工具,
         # 让普通消息的 skill 白名单与注册表有交集,模型调用才能发生。
         registry.register(Tool(
-            "feedback_overview", "Overview placeholder",
+            "bill_overview", "Overview placeholder",
             {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
             lambda: {}))
         return registry.names()
@@ -131,7 +131,7 @@ class SessionLockRaceTests(unittest.TestCase):
             alice = User("alice", "approver")
 
             # 准备:第一次 chat 触发 high_write 暂停,产生 pending 审批
-            paused = app.chat(alice, "s", "$executive-report create issue")
+            paused = app.chat(alice, "s", "$monthly-guard-report create issue")
             self.assertEqual("approval_pending", paused["status"])
 
             # 并发:慢速 chat 与审批恢复同时在同一 session 上运行
@@ -173,12 +173,29 @@ class _BlockingLLM:
         return json.dumps({"thought": "done", "final": "ok"}, ensure_ascii=False)
 
 
+class _BillReadManager:
+    """只注册一个 bill.* 只读工具,让默认 skill(bill-triage)的白名单与
+    fake 注册表相交,本地演示链路的模型调用才能发生。"""
+
+    def snapshots(self):
+        return [SimpleNamespace(name="bill", transport="test", server_name="t",
+                                server_version="t", protocol_version="t",
+                                tools=(), resources=(), prompts=())]
+
+    def register_tools(self, registry: ToolRegistry, server_name: str):
+        registry.register(Tool(
+            "bill.aggregate", "Aggregate bills",
+            {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            lambda: {"count": 0, "total_amount": 0}))
+        return registry.names()
+
+
 class LlmSemaphoreTests(unittest.TestCase):
     def test_over_limit_chat_gets_busy_error(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             llm = _BlockingLLM()
-            app = FeedbackWebApp(root / "web", root / "docs", llm,
+            app = FeedbackWebApp(root / "web", root / "docs", llm, _BillReadManager(),
                                  max_concurrent_llm=1)
             alice = User("alice", "approver")
             result: dict[str, Any] = {}

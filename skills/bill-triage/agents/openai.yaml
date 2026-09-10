@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bill Triage"
+  short_description: "Evidence-first bill spending triage"
+  default_prompt: "Use $bill-triage to triage this bill spending question with evidence."

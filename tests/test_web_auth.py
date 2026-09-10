@@ -156,7 +156,7 @@ class ServerSideIdentityTests(unittest.TestCase):
             alice = User("alice", "approver")
             mallory = User("mallory", "viewer")
 
-            paused = app.chat(alice, "s-approve", "$executive-report create issue")
+            paused = app.chat(alice, "s-approve", "$monthly-guard-report create issue")
             self.assertEqual("approval_pending", paused["status"])
             with self.assertRaises(PermissionDenied):  # viewer 无审批能力
                 app.decide_approval(mallory, "s-approve",

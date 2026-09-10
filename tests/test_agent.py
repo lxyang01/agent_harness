@@ -301,6 +301,23 @@ TK-003,2026-08-03 12:00:00,支付,退款三天还没有到账,企业,已完成
 
     def test_web_app_snapshot_chat_import_and_session_delete(self):
         app = PlanningWebApp(self.root / "web-state", self.docs, FeedbackMockLLM())
+        # Task 4 起 production skills 只信任 bill.* 工具;本地 Feedback Agent 演示
+        # 链路(Task 5 迁移 Web 层)在测试内使用旧 feedback 技能夹具,保持对
+        # Web 管道(chat/证据/快照/会话删除)的覆盖不变。
+        legacy_skills = self.root / "legacy-skills"
+        triage = legacy_skills / "feedback-triage"
+        triage.mkdir(parents=True)
+        (triage / "SKILL.md").write_text(
+            "---\nname: feedback-triage\ndescription: Legacy fixture for the web pipeline test.\n---\n\n"
+            "用反馈工具回答概览问题。", encoding="utf-8")
+        (legacy_skills / "routes.json").write_text(json.dumps({
+            "default_skill": "feedback-triage",
+            "routes": [{"skill": "feedback-triage", "triggers": ["反馈", "问题"],
+                        "allowed_tools": ["feedback_overview", "feedback_search", "feedback_samples"]}],
+        }, ensure_ascii=False), encoding="utf-8")
+        from billguard.agents import create_feedback_agent
+        app._agent = lambda session_id: create_feedback_agent(
+            app.llm, session_id, app.session_dir, app.feedback, skill_dir=legacy_skills)
         user = User("tester", "approver")
         empty = app.snapshot(user, "web-project")
         self.assertEqual(0, empty["overview"]["total"])

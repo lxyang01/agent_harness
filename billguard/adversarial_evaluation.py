@@ -678,7 +678,7 @@ class AdversarialEvaluator:
                              gateway, work_items, authenticator)
         alice = User("alice", "approver")
         mallory = User("mallory", "viewer")
-        paused = app.chat(alice, "approval-session", "$executive-report create issue")
+        paused = app.chat(alice, "approval-session", "$monthly-guard-report create issue")
         viewer_blocked = False
         try:
             app.decide_approval(mallory, "approval-session",
@@ -734,7 +734,7 @@ class AdversarialEvaluator:
         app = FeedbackWebApp(root / "web", root / "docs", llm, _AuthFakeManager(work_items),
                              gateway, work_items, authenticator)
         alice = User("alice", "approver")
-        paused = app.chat(alice, "approval-session", "$executive-report create issue")
+        paused = app.chat(alice, "approval-session", "$monthly-guard-report create issue")
         barrier = threading.Barrier(8)
         outcomes: list[bool] = []
 

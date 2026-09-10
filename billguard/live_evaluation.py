@@ -453,7 +453,7 @@ class LiveEvaluationRunner:
             imported = FeedbackService(feedback_dir).import_csv(fixture.name, csv_text)
             with MCPClientManager(request_timeout=self.request_timeout) as manager:
                 manager.connect_stdio(
-                    "feedback", sys.executable,
+                    "bill", sys.executable,
                     ["-u", "-m", "billguard.mcp_servers.bill_server",
                      "--data-dir", str(feedback_dir), "--transport", "stdio"],
                     cwd=self.project_root,

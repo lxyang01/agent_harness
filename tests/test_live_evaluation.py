@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from billguard.agents import FeedbackMockLLM
+from billguard.agents import BillMockLLM
 from billguard.harness import AgentResponse, RunEvent
 from billguard.live_evaluation import (
     ArgumentRule,
@@ -72,11 +72,18 @@ class LiveEvaluationTests(unittest.TestCase):
         self.assertFalse(result["approval_violation"])
 
     def test_runner_executes_isolated_skill_mcp_harness_path(self):
-        case = load_live_eval_cases(
-            PROJECT_ROOT / "evals" / "live_agent_cases.jsonl",
-        )[0]
+        # live 数据集仍是反馈域(待 T7 迁移);用账单域内联用例验证
+        # Skill 路由 → MCP → Harness 全链路仍然贯通。
+        case = LiveEvalCase(
+            id="live-bill-triage", category="triage",
+            input="给我一个当前账单支出概览，只说明数据事实。",
+            expected_skills=("bill-triage",),
+            required_tools=("bill.aggregate",),
+            required_sequence=("bill.aggregate",),
+            forbidden_tools=(), expected_status="completed", argument_rules=(),
+        )
         report = LiveEvaluationRunner(
-            FeedbackMockLLM(), PROJECT_ROOT, request_timeout=20,
+            BillMockLLM(), PROJECT_ROOT, request_timeout=20,
         ).run([case], repeats=1)
         self.assertGreater(report["fixture_rows"], 0)
         self.assertEqual(1, report["metrics"]["runs"])

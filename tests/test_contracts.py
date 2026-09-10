@@ -5,9 +5,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from billguard.agents import create_feedback_agent
-from billguard.feedback import FeedbackService
+from billguard.harness import AgentSpec, HarnessEngine
 from billguard.harness.contracts import compile_request_contract
+from billguard.session import SessionStore
+from billguard.skills import SkillRuntime
+from billguard.tools import Tool, ToolRegistry
 
 
 PROJECT_SKILLS = Path(__file__).resolve().parents[1] / "skills"
@@ -52,14 +54,14 @@ class ContractCompilerTests(unittest.TestCase):
             def __init__(self):
                 self.outputs = iter([
                     json.dumps({"thought": "missing bound", "tool_call": {
-                        "name": "feedback_samples", "arguments": {"tag": "登录问题"},
+                        "name": "bill.get_samples", "arguments": {"merchant": "爱奇艺"},
                     }}),
                     json.dumps({"thought": "fixed", "tool_call": {
-                        "name": "feedback_samples", "arguments": {
-                            "tag": "登录问题", "limit": 8,
+                        "name": "bill.get_samples", "arguments": {
+                            "merchant": "爱奇艺", "limit": 8,
                         },
                     }}),
-                    json.dumps({"thought": "done", "final": "已按最多8条读取样本。"}),
+                    json.dumps({"thought": "done", "final": "已按最多8条读取脱敏样本。"}),
                 ])
 
             def complete(self, messages, tools):
@@ -67,13 +69,22 @@ class ContractCompilerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            agent = create_feedback_agent(
-                LimitLLM(), "limit-session", root / "sessions",
-                FeedbackService(root / "feedback"), skill_dir=PROJECT_SKILLS,
+            registry = ToolRegistry()
+            registry.register(Tool(
+                "bill.get_samples", "Read masked samples",
+                {"type": "object",
+                 "properties": {"merchant": {"type": "string"}, "limit": {"type": "integer"}},
+                 "required": [], "additionalProperties": False},
+                lambda **kwargs: {"matched": 0, "samples": [], "pii_masked": True},
+            ))
+            agent = HarnessEngine(
+                AgentSpec("limit-test", "Use the sample tool.", ("bill.get_samples",), 4),
+                LimitLLM(), registry, SessionStore(root / "sessions"),
+                skills=SkillRuntime(PROJECT_SKILLS),
             )
             events = []
             agent.hooks.append(events.append)
-            response = agent.run("limit-session", "读取最多8条登录问题样本")
+            response = agent.run("limit-session", "读取最多8条爱奇艺账单样本")
             self.assertEqual("completed", response.status)
             blocked = [event for event in events if event.event_type == "argument_blocked"]
             self.assertEqual(1, len(blocked))
@@ -82,6 +93,8 @@ class ContractCompilerTests(unittest.TestCase):
             self.assertEqual(8, starts[0].data["arguments"]["limit"])
 
     def test_harness_blocks_incomplete_report_final(self):
+        # contracts.compile_request_contract 的报告章节契约按 legacy 技能名
+        # "executive-report" 编译;用夹具技能验证 Harness 的拦截机制仍然生效。
         class ReportLLM:
             def __init__(self):
                 self.outputs = iter([
@@ -97,15 +110,32 @@ class ContractCompilerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            agent = create_feedback_agent(
-                ReportLLM(), "report-session", root / "sessions",
-                FeedbackService(root / "feedback"), skill_dir=PROJECT_SKILLS,
+            skill_root = root / "skills"
+            skill_dir = skill_root / "executive-report"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: executive-report\ndescription: Report contract fixture.\n---\n"
+                "Write the full report.", encoding="utf-8",
+            )
+            (skill_root / "routes.json").write_text(json.dumps({
+                "default_skill": "executive-report",
+                "routes": [{"skill": "executive-report", "triggers": ["报告"],
+                            "allowed_tools": ["safe.read"]}],
+            }, ensure_ascii=False), encoding="utf-8")
+            registry = ToolRegistry()
+            registry.register(Tool(
+                "safe.read", "Read", {"type": "object", "properties": {},
+                                      "required": [], "additionalProperties": False},
+                lambda: {},
+            ))
+            agent = HarnessEngine(
+                AgentSpec("report-test", "Use the tool.", ("safe.read",), 3),
+                ReportLLM(), registry, SessionStore(root / "sessions"),
+                skills=SkillRuntime(skill_root),
             )
             events = []
             agent.hooks.append(events.append)
-            response = agent.run(
-                "report-session", "生成管理层报告：概述主要问题、数据限制和可执行建议。",
-            )
+            response = agent.run("report-session", "生成管理层报告：概述主要问题、数据限制和可执行建议。")
             self.assertEqual("completed", response.status)
             blocked = [event for event in events if event.event_type == "output_contract_blocked"]
             self.assertEqual(1, len(blocked))

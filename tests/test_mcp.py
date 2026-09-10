@@ -11,6 +11,7 @@ from pathlib import Path
 
 import mcp
 
+from billguard.agents import BillMockLLM, create_mcp_bill_agent
 from billguard.bills import BillService
 from billguard.mcp_runtime import MCPClientManager, MCPError
 from billguard.tools import ToolRegistry
@@ -139,6 +140,18 @@ BG-004,2026-09-05 20:00:00,爱奇艺,订阅,35.0,支付宝,视频会员自动续
         self.assertEqual(1, queried["total"])
         self.assertTrue(queried["pii_masked"])
         self.assertTrue(any(event == "mcp_tool_end" for event, _ in self.audit))
+
+    def test_harness_runs_with_dynamically_discovered_mcp_tools(self):
+        agent = create_mcp_bill_agent(
+            BillMockLLM(), "mcp-session", self.manager,
+            self.root / "sessions", PROJECT_ROOT / "skills",
+        )
+        result = agent.run("mcp-session", "最近有没有订阅涨价异常")
+        self.assertEqual("completed", result.status)
+        self.assertEqual(("anomaly-investigation",), result.active_skills)
+        self.assertIn("视频会员", result.answer)
+        trace = next((self.root / "sessions" / "traces").glob("*.jsonl")).read_text(encoding="utf-8")
+        self.assertIn("bill.detect_anomalies", trace)
 
     def test_update_status_maps_to_workflow_with_status_enum(self):
         result = self.manager.call_tool("bill", "update_status", {

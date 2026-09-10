@@ -69,7 +69,7 @@ class RoutingEvaluator:
         for case in cases:
             started = time.perf_counter()
             if variant == "baseline":
-                predicted_skills = ("feedback-triage",)
+                predicted_skills = ("bill-triage",)
                 predicted_required: tuple[str, ...] = ()
             else:
                 activations = self.skills.activate(case.input)

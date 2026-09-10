@@ -1,4 +1,4 @@
 interface:
   display_name: "Anomaly Investigation"
-  short_description: "Investigate feedback anomalies with evidence"
-  default_prompt: "Use $anomaly-investigation to investigate the recent feedback spike."
+  short_description: "Investigate bill anomalies with evidence"
+  default_prompt: "Use $anomaly-investigation to investigate the suspicious charges in my bills."

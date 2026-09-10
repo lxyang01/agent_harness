@@ -212,7 +212,7 @@ class WebApprovalTests(unittest.TestCase):
                 FakeWorkItemManager(work_items), gateway, work_items,
             )
 
-            paused = app.chat(approver, "approval-session", "$executive-report create issue")
+            paused = app.chat(approver, "approval-session", "$monthly-guard-report create issue")
             self.assertEqual("approval_pending", paused["status"])
             self.assertEqual("pending", work_items.approval(remote["approval_id"])["status"])
 
