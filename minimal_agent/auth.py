@@ -63,6 +63,11 @@ def _hash_password(password: str, salt: bytes) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
 
 
+# 未知用户名的等代价哈希,用于抹平 verify 的计时差
+_DUMMY_SALT = b"feedback-lens-timing-equalizer"
+_DUMMY_HASH = _hash_password("feedback-lens", _DUMMY_SALT).hex()
+
+
 class UserStore:
     """SQLite-backed users with salted PBKDF2 password hashing."""
 
@@ -75,6 +80,10 @@ class UserStore:
                 username TEXT PRIMARY KEY, password_hash TEXT NOT NULL,
                 salt TEXT NOT NULL, role TEXT NOT NULL,
                 disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)""")
+            # 密码重置需联动清理会话;即使 AuthSessionStore 尚未初始化也保证表存在
+            db.execute("""CREATE TABLE IF NOT EXISTS auth_sessions (
+                token_hash TEXT PRIMARY KEY, username TEXT NOT NULL,
+                created_at TEXT NOT NULL, expires_at TEXT NOT NULL)""")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -134,6 +143,8 @@ class UserStore:
             row = self._row(db, username.strip())
         # 统一失败信息，不区分“用户不存在”与“密码错误”
         if row is None:
+            # 未知用户名也执行一次等代价哈希,避免通过响应时间枚举有效用户名
+            hmac.compare_digest(_hash_password(password, _DUMMY_SALT).hex(), _DUMMY_HASH)
             raise AuthError("用户名或密码错误")
         candidate = _hash_password(password, bytes.fromhex(row["salt"]))
         if not hmac.compare_digest(candidate.hex(), row["password_hash"]):
@@ -168,6 +179,8 @@ class UserStore:
                 raise AuthError(f"用户不存在:{username}")
             db.execute("UPDATE users SET password_hash = ?, salt = ? WHERE username = ?",
                        (_hash_password(password, salt).hex(), salt.hex(), username))
+            # 密码已重置,旧凭证对应的存量会话一并失效
+            db.execute("DELETE FROM auth_sessions WHERE username = ?", (username,))
 
     def set_disabled(self, username: str, disabled: bool) -> User:
         with self._connect() as db:

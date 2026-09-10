@@ -11,7 +11,7 @@ from pathlib import Path
 
 from minimal_agent.agents import FeedbackMockLLM
 from minimal_agent.auth import AuthSessionStore, Authenticator, UserStore
-from minimal_agent.web import FeedbackWebApp, make_handler
+from minimal_agent.web import BusyError, FeedbackWebApp, make_handler
 from http.server import ThreadingHTTPServer
 
 
@@ -117,6 +117,22 @@ class HttpAuthTests(unittest.TestCase):
         status, _ = self.post("/api/admin/users/disable",
                               {"username": "newbie", "disabled": True})
         self.assertEqual(200, status)
+
+
+    def test_busy_error_maps_to_429(self):
+        self.post("/api/auth/login", {"username": "admin", "password": "admin-pass-1234"})
+        original_chat = self.app.chat
+
+        def busy_chat(*args, **kwargs):
+            raise BusyError("服务繁忙,请稍后重试")
+
+        self.app.chat = busy_chat
+        try:
+            status, data = self.post("/api/chat", {"message": "hi"})
+        finally:
+            self.app.chat = original_chat
+        self.assertEqual(429, status)
+        self.assertIn("繁忙", data["error"])
 
 
 if __name__ == "__main__":

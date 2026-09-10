@@ -117,10 +117,14 @@ class WorkItemStore:
                 db.execute("UPDATE approvals SET status = 'expired' WHERE id = ?", (approval_id,))
                 raise WorkItemError(f"approval has expired: {approval_id}")
             status = "approved" if approved else "rejected"
-            db.execute(
-                "UPDATE approvals SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?",
+            # 条件 UPDATE 保证并发 decide 恰好一个生效(与 ApprovalStore.decide 同款)。
+            cursor = db.execute(
+                "UPDATE approvals SET status = ?, decided_by = ?, decided_at = ? "
+                "WHERE id = ? AND status = 'pending'",
                 (status, decided_by, datetime.now(timezone.utc).isoformat(), approval_id),
             )
+            if cursor.rowcount == 0:
+                raise WorkItemError(f"approval is already decided: {approval_id}")
         return self.approval(approval_id)
 
     def commit_issue(self, approval_id: str) -> dict[str, Any]:

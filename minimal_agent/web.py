@@ -30,6 +30,10 @@ from .work_items import WorkItemError, WorkItemStore
 STATIC_ROOT = Path(__file__).with_name("web_static")
 
 
+class BusyError(RuntimeError):
+    """429: all model-concurrency slots are taken; retry shortly."""
+
+
 class FeedbackWebApp:
     """Customer feedback insight service shared by the HTTP handler and tests."""
 
@@ -37,7 +41,10 @@ class FeedbackWebApp:
                  mcp_manager: MCPClientManager | None = None,
                  policy_gateway: PolicyGateway | None = None,
                  work_item_store: WorkItemStore | None = None,
-                 authenticator: Any = None) -> None:
+                 authenticator: Any = None,
+                 max_concurrent_llm: int = 4) -> None:
+        if max_concurrent_llm < 1:
+            raise ValueError("max_concurrent_llm must be >= 1")
         self.data_dir = Path(data_dir)
         self.session_dir = self.data_dir / "feedback_sessions"
         self.evidence_dir = self.data_dir / "feedback_evidence"
@@ -50,6 +57,7 @@ class FeedbackWebApp:
         self.policy_gateway = policy_gateway
         self.work_item_store = work_item_store
         self.authenticator = authenticator
+        self._llm_slots = threading.BoundedSemaphore(max_concurrent_llm)
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
@@ -152,6 +160,14 @@ class FeedbackWebApp:
 
     def chat(self, user: Any, session_id: str, message: str) -> dict[str, Any]:
         validate_user_input(message)
+        if not self._llm_slots.acquire(blocking=False):
+            raise BusyError("服务繁忙,请稍后重试")
+        try:
+            return self._chat_locked(user, session_id, message)
+        finally:
+            self._llm_slots.release()
+
+    def _chat_locked(self, user: Any, session_id: str, message: str) -> dict[str, Any]:
         with self._lock(session_id):
             self._require_session_access(user, session_id)
             self._claim_session(user, session_id)
@@ -206,43 +222,55 @@ class FeedbackWebApp:
         decision = str(body.get("decision", "")).strip().lower()
         if not approval_id or decision not in {"approve", "reject"}:
             raise PolicyError("approval_id and decision (approve or reject) are required")
-        current = self.policy_gateway.store.get(approval_id)
-        if current.session_id != session_id:
-            raise PolicyError("approval does not belong to this session")
-        approved = decision == "approve"
-        decided_by = user.username  # 服务端身份,忽略请求体中的 decided_by
-        note = str(body.get("note", ""))
+        if not self._llm_slots.acquire(blocking=False):
+            raise BusyError("服务繁忙,请稍后重试")
+        try:
+            return self._decide_approval_locked(
+                user, session_id, approval_id, decision, str(body.get("note", "")))
+        finally:
+            self._llm_slots.release()
 
-        # The Work Item service owns a second, domain-level approval state. Keeping
-        # both gates means a forged Harness checkpoint still cannot create an issue.
-        if current.tool_name.endswith("commit_issue") and self.work_item_store is not None:
-            remote_approval_id = str(current.arguments.get("approval_id", "")).strip()
-            if not remote_approval_id:
-                raise PolicyError("commit_issue approval has no remote approval_id")
-            self.work_item_store.decide(remote_approval_id, approved, decided_by)
+    def _decide_approval_locked(self, user: Any, session_id: str,
+                                approval_id: str, decision: str, note: str) -> dict[str, Any]:
+        # 与 chat 共用同一把会话锁:审批恢复与进行中的对话都会加载并回写
+        # Session 文件,无锁并发会互相覆盖(丢失更新)。
+        with self._lock(session_id):
+            current = self.policy_gateway.store.get(approval_id)
+            if current.session_id != session_id:
+                raise PolicyError("approval does not belong to this session")
+            approved = decision == "approve"
+            decided_by = user.username  # 服务端身份,忽略请求体中的 decided_by
 
-        decided = self.policy_gateway.store.decide(
-            approval_id, approved, decided_by, note,
-        )
-        agent = self._agent(session_id)
-        events: list[Any] = []
-        agent.hooks.append(events.append)
-        response = agent.resume(approval_id) if approved else agent.finalize_rejection(approval_id)
-        evidence = self._build_evidence(events)
-        self._save_evidence(session_id, response.answer, evidence)
-        return {
-            "answer": response.answer,
-            "steps": response.steps,
-            "trace_id": response.trace_id,
-            "status": response.status,
-            "approval": self.policy_gateway.store.get(decided.id).as_dict(),
-            "approvals": self.approvals(user, session_id),
-            "sessions": self.list_sessions(user, session_id),
-            "overview": self.feedback.overview(),
-            "evidence": evidence,
-            "mcp_servers": self.mcp_servers(),
-            "runs": self.traces.list_runs(session_id),
-        }
+            # The Work Item service owns a second, domain-level approval state. Keeping
+            # both gates means a forged Harness checkpoint still cannot create an issue.
+            if current.tool_name.endswith("commit_issue") and self.work_item_store is not None:
+                remote_approval_id = str(current.arguments.get("approval_id", "")).strip()
+                if not remote_approval_id:
+                    raise PolicyError("commit_issue approval has no remote approval_id")
+                self.work_item_store.decide(remote_approval_id, approved, decided_by)
+
+            decided = self.policy_gateway.store.decide(
+                approval_id, approved, decided_by, note,
+            )
+            agent = self._agent(session_id)
+            events: list[Any] = []
+            agent.hooks.append(events.append)
+            response = agent.resume(approval_id) if approved else agent.finalize_rejection(approval_id)
+            evidence = self._build_evidence(events)
+            self._save_evidence(session_id, response.answer, evidence)
+            return {
+                "answer": response.answer,
+                "steps": response.steps,
+                "trace_id": response.trace_id,
+                "status": response.status,
+                "approval": self.policy_gateway.store.get(decided.id).as_dict(),
+                "approvals": self.approvals(user, session_id),
+                "sessions": self.list_sessions(user, session_id),
+                "overview": self.feedback.overview(),
+                "evidence": evidence,
+                "mcp_servers": self.mcp_servers(),
+                "runs": self.traces.list_runs(session_id),
+            }
 
     @staticmethod
     def _answer_key(answer: str) -> str:
@@ -360,6 +388,7 @@ class FeedbackWebApp:
         updates = body.get("updates", {})
         if not isinstance(ticket_ids, list) or not isinstance(updates, dict):
             raise ValueError("ticket_ids and updates are required")
+        updates.pop("operator", None)  # 身份一律取服务端,防止与 kwarg 冲突
         return self.feedback.update_workflow(ticket_ids, user.username, **updates)
 
     def feedback_audits(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -617,6 +646,8 @@ def make_handler(app: FeedbackWebApp) -> type[BaseHTTPRequestHandler]:
                 self._json(400, {"error": str(exc)})
             except PermissionDenied as exc:
                 self._json(403, {"error": str(exc)})
+            except BusyError as exc:
+                self._json(429, {"error": str(exc)})
             except Exception as exc:
                 self._json(500, {"error": f"request failed: {exc}"})
 
@@ -628,7 +659,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
           base_url: str = "https://api.openai.com/v1", tool_source: str = "local",
           mcp_timeout: float = 20.0, work_item_mcp_url: str = "",
           work_item_data_dir: str = ".sessions/work-items",
-          llm_proxy: str | None = None) -> None:
+          llm_proxy: str | None = None, max_concurrent_llm: int = 4) -> None:
     llm = (FeedbackMockLLM() if llm_name == "mock" else
            OpenAICompatibleLLM(model, base_url=base_url, proxy=llm_proxy))
     mcp_manager: MCPClientManager | None = None
@@ -657,7 +688,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
     server = ThreadingHTTPServer(
         (host, port), make_handler(FeedbackWebApp(
             data_dir, docs_dir, llm, mcp_manager, policy_gateway, work_item_store,
-            authenticator,
+            authenticator, max_concurrent_llm,
         )),
     )
     print(f"Feedback Lens Web UI: http://{host}:{server.server_port}")
@@ -692,10 +723,12 @@ def main() -> None:
                         help="Optional remote Work Item MCP Streamable HTTP endpoint")
     parser.add_argument("--work-item-data-dir", default=".sessions/work-items",
                         help="Shared Work Item store used for out-of-band web approval")
+    parser.add_argument("--max-concurrent-llm", type=int, default=4,
+                        help="同时进行的模型调用上限,超出返回 429")
     args = parser.parse_args()
     serve(args.host, args.port, args.data_dir, args.docs_dir, args.llm, args.model,
           args.base_url, args.tool_source, args.mcp_timeout, args.work_item_mcp_url,
-          args.work_item_data_dir, args.llm_proxy)
+          args.work_item_data_dir, args.llm_proxy, args.max_concurrent_llm)
 
 
 if __name__ == "__main__":
