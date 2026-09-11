@@ -126,11 +126,16 @@ def create_bill_agent(llm: LLM, session_id: str, data_dir: str | Path = ".sessio
 def create_mcp_bill_agent(llm: LLM, session_id: str, manager: MCPClientManager,
                           data_dir: str | Path = ".sessions",
                           skill_dir: str | Path | None = None,
-                          policy_gateway: PolicyGateway | None = None) -> HarnessEngine:
-    """Create the bill Agent from tools dynamically advertised by MCP servers."""
-    registry = ToolRegistry()
-    for snapshot in manager.snapshots():
-        manager.register_tools(registry, snapshot.name)
+                          policy_gateway: PolicyGateway | None = None,
+                          registry: ToolRegistry | None = None) -> HarnessEngine:
+    """Create the bill Agent from tools dynamically advertised by MCP servers.
+
+    registry 允许调用方(如 web 层)在 manager.register_tools 完成后注入
+    owner 身份边界再交给 Harness;缺省时仍由 manager 即时发现并注册。"""
+    if registry is None:
+        registry = ToolRegistry()
+        for snapshot in manager.snapshots():
+            manager.register_tools(registry, snapshot.name)
     if not registry.names():
         raise ValueError("no MCP tools were discovered")
     spec = replace(BILL_AGENT_SPEC, tool_names=registry.names())

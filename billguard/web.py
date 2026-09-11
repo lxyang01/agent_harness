@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import mimetypes
 import sys
 import threading
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -23,7 +25,7 @@ from .mcp_runtime import MCPClientManager
 from .observability import TraceStore
 from .policy import ApprovalStore, PolicyError, PolicyGateway
 from .session import SessionStore
-from .tools import ToolError
+from .tools import Tool, ToolRegistry, ToolError
 from .work_items import WorkItemError, WorkItemStore
 
 
@@ -32,6 +34,58 @@ STATIC_ROOT = Path(__file__).with_name("web_static")
 
 class BusyError(RuntimeError):
     """429: all model-concurrency slots are taken; retry shortly."""
+
+
+def _make_owner_wrapper(original: Any, owner: str, allowed: frozenset[str],
+                        identities: frozenset[str]) -> Any:
+    """闭包工厂:wrapper 只接受 **arguments,没有任何具名参数——模型显式传
+    同名关键字(如 {"_owner": "admin"})无处绑定,无法覆盖注入身份;
+    同时按 Schema 过滤参数,未知键(含 _server/_tool 等内部键)一律丢弃。
+    identities 中的身份键(owner/operator)一律强制覆盖为服务端身份。"""
+    def wrapped(**arguments: Any) -> Any:
+        arguments = {key: value for key, value in arguments.items() if key in allowed}
+        for key in identities:
+            arguments[key] = owner  # 服务端身份强制覆盖,防伪造跨 owner/操作者
+        return original(**arguments)
+    return wrapped
+
+
+def inject_owner_identity(registry: ToolRegistry, username: str) -> ToolRegistry:
+    """MCP 模式的 owner 身份注入:bill.* 工具只能以当前登录用户执行。
+
+    - handler 包装(_make_owner_wrapper):arguments["owner"] 一律覆盖为服务端
+      身份,模型伪造的 owner(如他人用户名)在到达 MCP 服务器前就被覆盖;
+      声明了 operator 参数的工具(update_status)同样注入登录用户为 operator;
+      wrapper 无具名参数且按 Schema 过滤参数,具名参数覆盖类攻击无效;
+    - Schema 隐藏:properties/required 移除身份键(owner/operator),模型侧
+      根本看不到这些参数;
+    - 非 bill.* 工具(如 work-items.*)原样透传,不受影响。
+
+    返回替换后的新注册表;入参注册表保持不变,需要恢复时直接弃用返回值即可。
+    """
+    injected = ToolRegistry()
+    for name in registry.names():
+        tool = registry.get(name)
+        if name.startswith("bill."):
+            parameters = copy.deepcopy(tool.parameters)
+            properties = parameters.get("properties")
+            # 身份键:owner 一律注入;operator 仅当工具声明该参数(update_status)
+            identities = frozenset({"owner"})
+            if isinstance(properties, dict):
+                identities = identities | ({"operator"} & set(properties))
+                for key in identities:
+                    properties.pop(key, None)
+            if isinstance(parameters.get("required"), list):
+                parameters["required"] = [key for key in parameters["required"]
+                                          if key not in identities]
+            allowed = frozenset(properties) if isinstance(properties, dict) else frozenset()
+            tool = replace(
+                tool,
+                handler=_make_owner_wrapper(tool.handler, username, allowed, identities),
+                parameters=parameters,
+            )
+        injected.register(tool)
+    return injected
 
 
 class BillGuardApp:
@@ -66,6 +120,10 @@ class BillGuardApp:
         with self._locks_guard:
             return self._locks.setdefault(session_id, threading.Lock())
 
+    def _scoped(self, user: Any):
+        """按用户装配的受限账单视图:查询自动过滤,写入自动盖 owner 戳。"""
+        return self.bills.for_user(user.username)
+
     def _require_session_access(self, user: Any, session_id: str) -> None:
         store = SessionStore(self.session_dir)
         if not store._path(session_id).exists():
@@ -89,6 +147,7 @@ class BillGuardApp:
         self._require_session_access(user, session_id)
         session = SessionStore(self.session_dir).load(session_id)
         evidence = self._load_evidence(session_id)
+        scoped = self._scoped(user)
         messages = []
         for message in session.messages:
             if message.role not in {"user", "assistant"} or message.tool_call_id:
@@ -102,14 +161,14 @@ class BillGuardApp:
             "messages": messages,
             "summary": session.summary,
             "sessions": self.list_sessions(user, session_id),
-            "overview": self.bills.overview(),
-            "anomalies": self.bills.anomalies(31, "spike", 8),
-            "bills": self.bills.query(page=1, page_size=30),
-            "categories": self.bills.categories(),
-            "audits": self.bills.recent_audits(),
-            "imports": self.bills.imports(),
-            "subscriptions": self.bills.subscriptions(),
-            "reports": self.bills.reports(),
+            "overview": scoped.overview(),
+            "anomalies": scoped.anomalies(31, "spike", 8),
+            "bills": scoped.query(page=1, page_size=30),
+            "categories": scoped.categories(),
+            "audits": scoped.recent_audits(),
+            "imports": scoped.imports(),
+            "subscriptions": scoped.subscriptions(),
+            "reports": scoped.reports(),
             "mcp_servers": self.mcp_servers(),
             "approvals": self.approvals(user, session_id),
             "runs": self.traces.list_runs(session_id),
@@ -173,7 +232,7 @@ class BillGuardApp:
         with self._lock(session_id):
             self._require_session_access(user, session_id)
             self._claim_session(user, session_id)
-            agent = self._agent(session_id)
+            agent = self._agent(user, session_id)
             events: list[Any] = []
             agent.hooks.append(events.append)
             response = agent.run(session_id, message)
@@ -185,7 +244,7 @@ class BillGuardApp:
                 "trace_id": response.trace_id,
                 "active_skills": list(response.active_skills),
                 "sessions": self.list_sessions(user, session_id),
-                "overview": self.bills.overview(),
+                "overview": self._scoped(user).overview(),
                 "evidence": evidence,
                 "mcp_servers": self.mcp_servers(),
                 "status": response.status,
@@ -206,12 +265,18 @@ class BillGuardApp:
     def list_evaluations(self) -> dict[str, Any]:
         return {"evaluations": self.evaluations.list()}
 
-    def _agent(self, session_id: str):
+    def _agent(self, user: Any, session_id: str):
         if self.mcp_manager is None:
-            return create_bill_agent(self.llm, session_id, self.session_dir, self.bills)
+            # 本地模式:工具注册表按当前用户装配受限视图,Agent 只能查/写本人数据
+            return create_bill_agent(self.llm, session_id, self.session_dir, self._scoped(user))
+        # MCP 模式:工具注册完成后按当前用户注入 owner 身份(模型不可见、不可伪造)
+        registry = ToolRegistry()
+        for snapshot in self.mcp_manager.snapshots():
+            self.mcp_manager.register_tools(registry, snapshot.name)
         return create_mcp_bill_agent(
             self.llm, session_id, self.mcp_manager, self.session_dir,
             policy_gateway=self.policy_gateway,
+            registry=inject_owner_identity(registry, user.username),
         )
 
     def decide_approval(self, user: Any, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -254,7 +319,7 @@ class BillGuardApp:
             decided = self.policy_gateway.store.decide(
                 approval_id, approved, decided_by, note,
             )
-            agent = self._agent(session_id)
+            agent = self._agent(user, session_id)
             events: list[Any] = []
             agent.hooks.append(events.append)
             response = agent.resume(approval_id) if approved else agent.finalize_rejection(approval_id)
@@ -268,7 +333,7 @@ class BillGuardApp:
                 "approval": self.policy_gateway.store.get(decided.id).as_dict(),
                 "approvals": self.approvals(user, session_id),
                 "sessions": self.list_sessions(user, session_id),
-                "overview": self.bills.overview(),
+                "overview": self._scoped(user).overview(),
                 "evidence": evidence,
                 "mcp_servers": self.mcp_servers(),
                 "runs": self.traces.list_runs(session_id),
@@ -335,36 +400,37 @@ class BillGuardApp:
         allowed = BillFilters.__dataclass_fields__
         return BillFilters(**{key: value for key, value in source.items() if key in allowed and value not in (None, "")})
 
-    def bill_overview(self, body: dict[str, Any]) -> dict[str, Any]:
-        return self.bills.overview(self._filters(body))
+    def bill_overview(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
+        return self._scoped(user).overview(self._filters(body))
 
-    def bill_query(self, body: dict[str, Any]) -> dict[str, Any]:
-        return self.bills.query(
+    def bill_query(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
+        return self._scoped(user).query(
             self._filters(body),
             int(body.get("page", 1)),
             int(body.get("page_size", 30)),
         )
 
-    def bill_anomalies(self, body: dict[str, Any]) -> dict[str, Any]:
-        return self.bills.anomalies(
+    def bill_anomalies(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
+        return self._scoped(user).anomalies(
             int(body.get("days", 31)), str(body.get("dimension", "spike")), int(body.get("limit", 8))
         )
 
-    def import_bills(self, body: dict[str, Any]) -> dict[str, Any]:
+    def import_bills(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
         filename = str(body.get("filename", "bills.csv")).strip() or "bills.csv"
         csv_text = body.get("csv_text")
         if not isinstance(csv_text, str):
             raise ValueError("csv_text 不能为空")
-        result = self.bills.import_bills(filename, csv_text)
+        scoped = self._scoped(user)
+        result = scoped.import_bills(filename, csv_text)
         payload: dict[str, Any] = {
             "result": result,
-            "overview": self.bills.overview(),
-            "imports": self.bills.imports(),
-            "subscriptions": self.bills.subscriptions(),
+            "overview": scoped.overview(),
+            "imports": scoped.imports(),
+            "subscriptions": scoped.subscriptions(),
         }
         subscriptions_csv_text = body.get("subscriptions_csv_text")
         if isinstance(subscriptions_csv_text, str) and subscriptions_csv_text.strip():
-            payload["subscriptions_result"] = self.bills.import_subscriptions(
+            payload["subscriptions_result"] = scoped.import_subscriptions(
                 str(body.get("subscriptions_filename", "subscriptions.csv")).strip() or "subscriptions.csv",
                 subscriptions_csv_text,
             )
@@ -375,26 +441,30 @@ class BillGuardApp:
         category = str(body.get("category", "")).strip()
         if not tx_id or not category:
             raise ValueError("tx_id 与 category 不能为空")
-        result = self.bills.update_transaction_category(tx_id, category, user.username)
-        return {"result": result, "categories": self.bills.categories(), "audits": self.bills.recent_audits()}
+        scoped = self._scoped(user)
+        result = scoped.update_transaction_category(tx_id, category, user.username)
+        return {"result": result, "categories": scoped.categories(), "audits": scoped.recent_audits()}
 
     def save_category(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
         keywords = body.get("keywords", [])
         if not isinstance(keywords, list):
             raise ValueError("keywords 必须是数组")
-        result = self.bills.save_category(
+        scoped = self._scoped(user)
+        result = scoped.save_category(
             str(body.get("name", "")), [str(item) for item in keywords], bool(body.get("enabled", True)),
             int(body["category_id"]) if body.get("category_id") is not None else None, user.username,
         )
-        return {"result": result, "categories": self.bills.categories(), "audits": self.bills.recent_audits()}
+        return {"result": result, "categories": scoped.categories(), "audits": scoped.recent_audits()}
 
     def delete_category(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
-        result = self.bills.delete_category(int(body.get("category_id", 0)), user.username)
-        return {"result": result, "categories": self.bills.categories(), "audits": self.bills.recent_audits()}
+        scoped = self._scoped(user)
+        result = scoped.delete_category(int(body.get("category_id", 0)), user.username)
+        return {"result": result, "categories": scoped.categories(), "audits": scoped.recent_audits()}
 
-    def rematch_categories(self) -> dict[str, Any]:
-        result = self.bills.rematch_categories()
-        return {"result": result, "categories": self.bills.categories(), "overview": self.bills.overview()}
+    def rematch_categories(self, user: Any) -> dict[str, Any]:
+        scoped = self._scoped(user)
+        result = scoped.rematch_categories(operator=user.username)
+        return {"result": result, "categories": scoped.categories(), "overview": scoped.overview()}
 
     def update_workflow(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
         tx_ids = body.get("tx_ids", [])
@@ -408,24 +478,26 @@ class BillGuardApp:
             raise ValueError(f"status 必须是{'、'.join(WORKFLOW_STATUSES)}")
         if len(note) > 200:
             raise ValueError("备注最长 200 字")
-        return self.bills.update_workflow(
+        return self._scoped(user).update_workflow(
             [str(item) for item in tx_ids], operator=user.username, status=status, note=note)
 
-    def transaction_audits(self, body: dict[str, Any]) -> dict[str, Any]:
+    def transaction_audits(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
         tx_id = str(body.get("tx_id", "")).strip()
-        return {"audits": self.bills.transaction_audits(tx_id)}
+        return {"audits": self._scoped(user).transaction_audits(tx_id)}
 
-    def export_bills(self, body: dict[str, Any]) -> dict[str, Any]:
-        return {"filename": "bills-export.csv", "csv_text": self.bills.export_csv(self._filters(body))}
+    def export_bills(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
+        return {"filename": "bills-export.csv", "csv_text": self._scoped(user).export_csv(self._filters(body))}
 
     def save_report(self, user: Any, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
         self._require_session_access(user, session_id)
-        report = self.bills.save_report(session_id, str(body.get("title", "")), str(body.get("content", "")))
-        return {"report": report, "reports": self.bills.reports()}
+        scoped = self._scoped(user)
+        report = scoped.save_report(session_id, str(body.get("title", "")), str(body.get("content", "")))
+        return {"report": report, "reports": scoped.reports()}
 
-    def delete_report(self, body: dict[str, Any]) -> dict[str, Any]:
-        result = self.bills.delete_report(int(body.get("report_id", 0)))
-        return {"result": result, "reports": self.bills.reports()}
+    def delete_report(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
+        scoped = self._scoped(user)
+        result = scoped.delete_report(int(body.get("report_id", 0)))
+        return {"result": result, "reports": scoped.reports()}
 
     def delete_session(self, user: Any, session_id: str) -> dict[str, Any]:
         """Delete all persisted state owned by one exact session id."""
@@ -485,12 +557,14 @@ _AUTH_EXEMPT_POST = {"/api/auth/login"}
 _CAPABILITY_BY_PATH = {
     "/api/reports/save": "report_write",
     "/api/reports/delete": "report_write",
-    "/api/bills/import": "feedback_write",
-    "/api/bills/categories": "feedback_write",
-    "/api/category-rules/save": "feedback_write",
-    "/api/category-rules/delete": "feedback_write",
-    "/api/category-rules/rematch": "feedback_write",
-    "/api/bills/workflow": "feedback_write",
+    "/api/bills/import": "bills_write",
+    "/api/bills/categories": "bills_write",
+    "/api/category-rules/save": "bills_write",
+    "/api/category-rules/delete": "bills_write",
+    "/api/category-rules/rematch": "bills_write",
+    "/api/bills/workflow": "bills_write",
+    # 导出含未脱敏 note,按写级保护:viewer 不可导出,前端同步隐藏按钮
+    "/api/bills/export": "bills_write",
     "/api/approvals/decide": "approval_decide",
     "/api/admin/users": "users_manage",
     "/api/admin/users/role": "users_manage",
@@ -610,13 +684,13 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
                         raise ValueError("message 不能为空")
                     result = app.chat(user, session_id, message)
                 elif self.path == "/api/bills/overview":
-                    result = app.bill_overview(body)
+                    result = app.bill_overview(user, body)
                 elif self.path == "/api/bills/query":
-                    result = app.bill_query(body)
+                    result = app.bill_query(user, body)
                 elif self.path == "/api/bills/anomalies":
-                    result = app.bill_anomalies(body)
+                    result = app.bill_anomalies(user, body)
                 elif self.path == "/api/bills/import":
-                    result = app.import_bills(body)
+                    result = app.import_bills(user, body)
                 elif self.path == "/api/bills/categories":
                     result = app.update_transaction_category(user, body)
                 elif self.path == "/api/category-rules/save":
@@ -624,17 +698,17 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
                 elif self.path == "/api/category-rules/delete":
                     result = app.delete_category(user, body)
                 elif self.path == "/api/category-rules/rematch":
-                    result = app.rematch_categories()
+                    result = app.rematch_categories(user)
                 elif self.path == "/api/bills/workflow":
                     result = app.update_workflow(user, body)
                 elif self.path == "/api/bills/audits":
-                    result = app.transaction_audits(body)
+                    result = app.transaction_audits(user, body)
                 elif self.path == "/api/bills/export":
-                    result = app.export_bills(body)
+                    result = app.export_bills(user, body)
                 elif self.path == "/api/reports/save":
                     result = app.save_report(user, session_id, body)
                 elif self.path == "/api/reports/delete":
-                    result = app.delete_report(body)
+                    result = app.delete_report(user, body)
                 elif self.path == "/api/session/delete":
                     result = app.delete_session(user, session_id)
                 elif self.path == "/api/approvals/list":
@@ -656,7 +730,7 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
                 elif self.path == "/api/admin/users/disable":
                     result = app.admin_set_disabled(user, body)
                 else:
-                    self._json(404, {"error": "not found"})
+                    self._json(404, {"error": "接口不存在"})
                     return
                 self._json(200, result)
             except (ValueError, ToolError, PolicyError, WorkItemError, json.JSONDecodeError) as exc:
@@ -666,7 +740,7 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
             except BusyError as exc:
                 self._json(429, {"error": str(exc)})
             except Exception as exc:
-                self._json(500, {"error": f"request failed: {exc}"})
+                self._json(500, {"error": f"请求失败:{exc}"})
 
     return Handler
 

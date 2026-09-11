@@ -92,10 +92,11 @@ class ServerSideIdentityTests(unittest.TestCase):
             root = Path(temp)
             app = build_app(root)
             service = BillService(root / "web" / "billguard" / "bills")
-            service.import_bills(
-                "demo.csv",
-                "tx_id,paid_at,merchant,amount\nTX-1,2026-08-04 10:30:00,美团外卖,32.5\n")
             alice = User("alice", "approver")
+            # 数据隔离后业务写入走按用户装配的受限视图:经应用层以 alice 身份入库
+            app.import_bills(alice, {
+                "filename": "demo.csv",
+                "csv_text": "tx_id,paid_at,merchant,amount\nTX-1,2026-08-04 10:30:00,美团外卖,32.5\n"})
             # 请求体里的 operator 一律忽略,取服务端身份
             result = app.update_workflow(alice, {
                 "tx_ids": ["TX-1"],
@@ -183,10 +184,12 @@ class WorkflowOperatorKeyTests(unittest.TestCase):
             root = Path(temp)
             app = build_app(root)
             service = BillService(root / "web" / "billguard" / "bills")
-            service.import_bills(
-                "demo.csv",
-                "tx_id,paid_at,merchant,amount\nTX-1,2026-08-04 10:30:00,美团外卖,32.5\n")
-            result = app.update_workflow(User("alice", "approver"), {
+            alice = User("alice", "approver")
+            # 数据隔离后业务写入走按用户装配的受限视图:经应用层以 alice 身份入库
+            app.import_bills(alice, {
+                "filename": "demo.csv",
+                "csv_text": "tx_id,paid_at,merchant,amount\nTX-1,2026-08-04 10:30:00,美团外卖,32.5\n"})
+            result = app.update_workflow(alice, {
                 "tx_ids": ["TX-1"],
                 "updates": {"status": "核查中", "note": "正在核对", "operator": "ghost"},
                 "operator": "ghost"})
@@ -195,8 +198,8 @@ class WorkflowOperatorKeyTests(unittest.TestCase):
             self.assertEqual("alice", audits[-1]["operator"])
             # 非法 status 与超长备注按现有校验风格拒绝
             with self.assertRaises(ValueError):
-                app.update_workflow(User("alice", "approver"),
+                app.update_workflow(alice,
                                     {"tx_ids": ["TX-1"], "updates": {"status": "处理中"}})
             with self.assertRaises(ValueError):
-                app.update_workflow(User("alice", "approver"),
+                app.update_workflow(alice,
                                     {"tx_ids": ["TX-1"], "updates": {"status": "正常", "note": "长" * 201}})

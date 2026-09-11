@@ -94,18 +94,44 @@ class BillService:
         finally:
             connection.close()
 
+    @staticmethod
+    def _owner_clause(owner: str, column: str = "owner") -> tuple[str, tuple]:
+        """owner 过滤子句:普通用户 = 本名行;admin 视野包含存量 NULL 行(与 Session 归属同构);
+        空串 = 仅存量 NULL 行(独立 CLI 探针用)。根服务(owner=None)不加子句。"""
+        if owner == "":
+            return f"{column} IS NULL", ()
+        if owner == "admin":
+            return f"({column} = ? OR {column} IS NULL)", (owner,)
+        return f"{column} = ?", (owner,)
+
+    @staticmethod
+    def _owner_where(owner: str | None, column: str = "owner") -> tuple[str, list[Any]]:
+        """独立 WHERE 子句(查询原本没有条件时使用);owner=None 时不加过滤。"""
+        if owner is None:
+            return "", []
+        clause, params = BillService._owner_clause(owner, column)
+        return f" WHERE {clause}", list(params)
+
+    @staticmethod
+    def _owner_and(owner: str | None, column: str = "owner") -> tuple[str, list[Any]]:
+        """拼接到既有 WHERE 末尾的 AND 片段;owner=None 时不加过滤。"""
+        if owner is None:
+            return "", []
+        clause, params = BillService._owner_clause(owner, column)
+        return f" AND {clause}", list(params)
+
     def _initialize(self) -> None:
         with self._connect() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS categories(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
                     keywords TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT NOT NULL);
+                    created_at TEXT NOT NULL, owner TEXT);
                 CREATE TABLE IF NOT EXISTS transactions(
-                    tx_id TEXT PRIMARY KEY, paid_at TEXT NOT NULL, merchant TEXT NOT NULL,
-                    note TEXT NOT NULL DEFAULT '', category_id INTEGER REFERENCES categories(id),
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, tx_id TEXT NOT NULL, paid_at TEXT NOT NULL,
+                    merchant TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', category_id INTEGER REFERENCES categories(id),
                     amount REAL NOT NULL, method TEXT NOT NULL DEFAULT '未知',
-                    status TEXT NOT NULL DEFAULT '正常', created_at TEXT NOT NULL);
+                    status TEXT NOT NULL DEFAULT '正常', created_at TEXT NOT NULL, owner TEXT);
                 CREATE INDEX IF NOT EXISTS idx_tx_paid_at ON transactions(paid_at);
                 CREATE INDEX IF NOT EXISTS idx_tx_merchant ON transactions(merchant);
                 CREATE TABLE IF NOT EXISTS subscriptions(
@@ -127,6 +153,54 @@ class BillService:
                     content TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL);
             """)
+            # 阶段 3:业务表补 owner 列(存量行保持 NULL = 仅 admin 可见)
+            tx_had_surrogate = False
+            for table in ("transactions", "categories", "subscriptions",
+                          "tx_audits", "imports", "reports"):
+                columns = {row["name"] for row in db.execute(
+                    f"PRAGMA table_info({table})")}
+                if table == "transactions":
+                    tx_had_surrogate = "id" in columns
+                if "owner" not in columns:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN owner TEXT")
+            # 旧库 categories.name 是全局唯一,须重建为按 (owner, name) 唯一,
+            # 否则各 owner 无法各自持有同名默认类别
+            legacy_unique_name = any(
+                row["origin"] == "u" for row in db.execute("PRAGMA index_list(categories)"))
+            if legacy_unique_name:
+                db.execute("PRAGMA foreign_keys=OFF")
+                db.execute("DROP TABLE IF EXISTS categories_rebuild")
+                db.execute("""CREATE TABLE categories_rebuild(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                    keywords TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL, owner TEXT)""")
+                db.execute("""INSERT INTO categories_rebuild(id, name, keywords, enabled, created_at, owner)
+                    SELECT id, name, keywords, enabled, created_at, owner FROM categories""")
+                db.execute("DROP TABLE categories")
+                db.execute("ALTER TABLE categories_rebuild RENAME TO categories")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_owner_name"
+                       " ON categories(COALESCE(owner, ''), name)")
+            # 旧库 transactions.tx_id 是全局主键,须重建为代理主键 + (owner, tx_id) 复合唯一,
+            # 否则不同 owner 无法各自导入相同编号的账单
+            if not tx_had_surrogate:
+                db.execute("PRAGMA foreign_keys=OFF")
+                db.execute("DROP TABLE IF EXISTS transactions_rebuild")
+                db.execute("""CREATE TABLE transactions_rebuild(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, tx_id TEXT NOT NULL, paid_at TEXT NOT NULL,
+                    merchant TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+                    category_id INTEGER REFERENCES categories(id), amount REAL NOT NULL,
+                    method TEXT NOT NULL DEFAULT '未知', status TEXT NOT NULL DEFAULT '正常',
+                    created_at TEXT NOT NULL, owner TEXT)""")
+                db.execute("""INSERT INTO transactions_rebuild(tx_id, paid_at, merchant, note, category_id,
+                    amount, method, status, created_at, owner)
+                    SELECT tx_id, paid_at, merchant, note, category_id, amount, method, status, created_at, owner
+                    FROM transactions""")
+                db.execute("DROP TABLE transactions")
+                db.execute("ALTER TABLE transactions_rebuild RENAME TO transactions")
+                db.execute("CREATE INDEX IF NOT EXISTS idx_tx_paid_at ON transactions(paid_at)")
+                db.execute("CREATE INDEX IF NOT EXISTS idx_tx_merchant ON transactions(merchant)")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_owner_tx"
+                       " ON transactions(COALESCE(owner, ''), tx_id)")
             # 仅在空库时播种默认类别,避免删光后重启又复活
             if db.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 0:
                 now = _now()
@@ -176,9 +250,18 @@ class BillService:
         return masked, counts
 
     @staticmethod
-    def _category_rules(db: sqlite3.Connection) -> list[tuple[int, str, list[str]]]:
+    def _category_rules(db: sqlite3.Connection,
+                        owner: str | None = None) -> list[tuple[int, str, list[str]]]:
+        # 自动分类只看同一 owner 的启用规则
+        if owner is None:
+            rows = db.execute("SELECT id, name, keywords FROM categories WHERE enabled=1 ORDER BY id")
+        else:
+            clause, params = BillService._owner_clause(owner)
+            rows = db.execute(
+                f"SELECT id, name, keywords FROM categories WHERE enabled=1 AND {clause} ORDER BY id",
+                params)
         rules = []
-        for row in db.execute("SELECT id, name, keywords FROM categories WHERE enabled=1 ORDER BY id"):
+        for row in rows:
             try:
                 keywords = json.loads(row["keywords"])
             except json.JSONDecodeError:
@@ -187,24 +270,37 @@ class BillService:
         return rules
 
     @staticmethod
-    def _ensure_category(db: sqlite3.Connection, name: str, now: str) -> int:
-        db.execute("INSERT INTO categories(name, keywords, enabled, created_at) VALUES (?, '[]', 1, ?) ON CONFLICT(name) DO NOTHING",
-                   (name, now))
-        return db.execute("SELECT id FROM categories WHERE name=?", (name,)).fetchone()[0]
+    def _ensure_category(db: sqlite3.Connection, name: str, now: str,
+                         owner: str | None = None) -> int:
+        db.execute("INSERT INTO categories(name, keywords, enabled, created_at, owner)"
+                   " VALUES (?, '[]', 1, ?, ?) ON CONFLICT DO NOTHING",
+                   (name, now, owner))
+        if owner is None:
+            return db.execute("SELECT id FROM categories WHERE name=?", (name,)).fetchone()[0]
+        clause, params = BillService._owner_clause(owner)
+        return db.execute(
+            f"SELECT id FROM categories WHERE name=? AND {clause}", (name, *params)).fetchone()[0]
 
     def _resolve_category(self, db: sqlite3.Connection, rules: list[tuple[int, str, list[str]]],
-                          category_name: str, merchant: str, note: str, now: str) -> int:
+                          category_name: str, merchant: str, note: str, now: str,
+                          owner: str | None = None) -> int:
         if category_name:
-            row = db.execute("SELECT id FROM categories WHERE name=?", (category_name,)).fetchone()
+            if owner is None:
+                row = db.execute("SELECT id FROM categories WHERE name=?", (category_name,)).fetchone()
+            else:
+                clause, params = BillService._owner_clause(owner)
+                row = db.execute(
+                    f"SELECT id FROM categories WHERE name=? AND {clause}",
+                    (category_name, *params)).fetchone()
             if row:
                 return row[0]
         haystack = f"{merchant} {note}".lower()
         for category_id, _, keywords in rules:
             if any(str(keyword).lower() in haystack for keyword in keywords):
                 return category_id
-        return self._ensure_category(db, "其他", now)
+        return self._ensure_category(db, "其他", now, owner)
 
-    def import_bills(self, filename: str, csv_text: str) -> dict[str, Any]:
+    def import_bills(self, filename: str, csv_text: str, owner: str | None = None) -> dict[str, Any]:
         if not csv_text.strip():
             raise ToolError("CSV 内容为空")
         reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))
@@ -215,7 +311,8 @@ class BillService:
         errors: list[str] = []
         now = _now()
         with self._connect() as db:
-            rules = self._category_rules(db)
+            rules = self._category_rules(db, owner)
+            owner_and, owner_params = self._owner_and(owner)
             for line_number, row in enumerate(reader, start=2):
                 total += 1
                 try:
@@ -228,16 +325,18 @@ class BillService:
                     method = str(row.get(columns.get("method", ""), "未知")).strip() or "未知"
                     note = str(row.get(columns.get("note", ""), "")).strip()
                     category_name = str(row.get(columns.get("category", ""), "")).strip()
+                    # 去重按 (owner, tx_id) 复合唯一:同号账单可在不同 owner 名下各自入库
                     cursor = db.execute(
-                        """INSERT INTO transactions(tx_id, paid_at, merchant, note, amount, method, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(tx_id) DO NOTHING""",
-                        (tx_id, paid_at, merchant, note, amount, method, now))
+                        """INSERT INTO transactions(tx_id, paid_at, merchant, note, amount, method, created_at, owner)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING""",
+                        (tx_id, paid_at, merchant, note, amount, method, now, owner))
                     if cursor.rowcount == 0:
                         duplicates += 1
                         continue
                     imported += 1
-                    category_id = self._resolve_category(db, rules, category_name, merchant, note, now)
-                    db.execute("UPDATE transactions SET category_id=? WHERE tx_id=?", (category_id, tx_id))
+                    category_id = self._resolve_category(db, rules, category_name, merchant, note, now, owner)
+                    db.execute(f"UPDATE transactions SET category_id=? WHERE tx_id=?{owner_and}",
+                               (category_id, tx_id, *owner_params))
                 except (ValueError, TypeError) as exc:
                     failed += 1
                     if len(errors) < 20:
@@ -245,9 +344,9 @@ class BillService:
             status = "completed" if failed == 0 else ("partial" if imported else "failed")
             db.execute(
                 """INSERT INTO imports(filename, total_rows, imported_rows, duplicate_rows,
-                   failed_rows, failed_reasons, status, imported_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   failed_rows, failed_reasons, status, imported_at, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (filename, total, imported, duplicates, failed,
-                 json.dumps(errors, ensure_ascii=False), status, now))
+                 json.dumps(errors, ensure_ascii=False), status, now, owner))
         return {
             "filename": filename,
             "total_rows": total,
@@ -258,7 +357,7 @@ class BillService:
             "errors": errors,
         }
 
-    def import_subscriptions(self, filename: str, csv_text: str) -> dict[str, Any]:
+    def import_subscriptions(self, filename: str, csv_text: str, owner: str | None = None) -> dict[str, Any]:
         if not csv_text.strip():
             raise ToolError("CSV 内容为空")
         reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))
@@ -280,6 +379,7 @@ class BillService:
         errors: list[str] = []
         now = _now()
         with self._connect() as db:
+            owner_and, owner_params = self._owner_and(owner)
             for line_number, row in enumerate(reader, start=2):
                 total += 1
                 try:
@@ -292,14 +392,15 @@ class BillService:
                     if cycle not in ("月", "年"):
                         raise ValueError(f"周期必须是 月 或 年:{cycle}")
                     exists = db.execute(
-                        "SELECT id FROM subscriptions WHERE name=? AND merchant=?", (name, merchant)).fetchone()
+                        f"SELECT id FROM subscriptions WHERE name=? AND merchant=?{owner_and}",
+                        (name, merchant, *owner_params)).fetchone()
                     if exists:
                         duplicates += 1
                         continue
                     db.execute(
-                        """INSERT INTO subscriptions(name, merchant, cycle, expected_amount, created_at)
-                           VALUES (?, ?, ?, ?, ?)""",
-                        (name, merchant, cycle, expected, now))
+                        """INSERT INTO subscriptions(name, merchant, cycle, expected_amount, created_at, owner)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (name, merchant, cycle, expected, now, owner))
                     imported += 1
                 except (ValueError, TypeError) as exc:
                     failed += 1
@@ -308,9 +409,9 @@ class BillService:
             status = "completed" if failed == 0 else ("partial" if imported else "failed")
             db.execute(
                 """INSERT INTO imports(filename, total_rows, imported_rows, duplicate_rows,
-                   failed_rows, failed_reasons, status, imported_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   failed_rows, failed_reasons, status, imported_at, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (filename, total, imported, duplicates, failed,
-                 json.dumps(errors, ensure_ascii=False), status, now))
+                 json.dumps(errors, ensure_ascii=False), status, now, owner))
         return {
             "filename": filename,
             "total_rows": total,
@@ -322,7 +423,8 @@ class BillService:
         }
 
     @staticmethod
-    def _where(filters: BillFilters, alias: str = "t") -> tuple[str, list[Any]]:
+    def _where(filters: BillFilters, alias: str = "t",
+               owner: str | None = None) -> tuple[str, list[Any]]:
         clauses: list[str] = []
         params: list[Any] = []
         mapping = {
@@ -354,11 +456,15 @@ class BillService:
             )
             value = f"%{filters.query}%"
             params.extend((value, value, value, value))
+        if owner is not None:
+            clause, owner_params = BillService._owner_clause(owner, f"{alias}.owner")
+            clauses.append(clause)
+            params.extend(owner_params)
         return (" WHERE " + " AND ".join(clauses) if clauses else ""), params
 
-    def overview(self, filters: BillFilters | None = None) -> dict[str, Any]:
+    def overview(self, filters: BillFilters | None = None, owner: str | None = None) -> dict[str, Any]:
         filters = filters or BillFilters()
-        where, params = self._where(filters)
+        where, params = self._where(filters, owner=owner)
         with self._connect() as db:
             row = db.execute(
                 f"""SELECT COALESCE(SUM(amount), 0) AS total_amount, COUNT(*) AS count,
@@ -382,10 +488,12 @@ class BillService:
                 f"""SELECT substr(t.paid_at, 1, 10) AS date, ROUND(SUM(t.amount), 2) AS amount
                     FROM transactions t{where} GROUP BY date ORDER BY date DESC LIMIT 90""", params)]
             trend_rows.reverse()
+            owner_where, owner_params = self._owner_where(owner)
             options = {
-                "categories": [item[0] for item in db.execute("SELECT name FROM categories ORDER BY name")],
+                "categories": [item[0] for item in db.execute(
+                    f"SELECT name FROM categories{owner_where} ORDER BY name", owner_params)],
                 "methods": [item[0] for item in db.execute(
-                    "SELECT DISTINCT method FROM transactions ORDER BY method")],
+                    f"SELECT DISTINCT method FROM transactions{owner_where} ORDER BY method", owner_params)],
             }
         active_days = row["active_days"]
         return {
@@ -400,16 +508,20 @@ class BillService:
             "options": options,
         }
 
-    def compare(self, days: int = 7) -> dict[str, Any]:
+    def compare(self, days: int = 7, owner: str | None = None) -> dict[str, Any]:
         days = min(max(1, days), 90)
         with self._connect() as db:
-            latest = db.execute("SELECT MAX(substr(paid_at, 1, 10)) FROM transactions").fetchone()[0]
+            owner_where, owner_params = self._owner_where(owner)
+            # 锚点=该 owner 数据的最新日期,避免窗口被别人的数据带偏
+            latest = db.execute(
+                f"SELECT MAX(substr(paid_at, 1, 10)) FROM transactions{owner_where}",
+                owner_params).fetchone()[0]
         anchor = datetime.fromisoformat(latest).date() if latest else datetime.now().date()
         current_start = anchor - timedelta(days=days - 1)
         previous_end = current_start - timedelta(days=1)
         previous_start = previous_end - timedelta(days=days - 1)
-        current = self.overview(BillFilters(date_from=current_start.isoformat(), date_to=anchor.isoformat()))
-        previous = self.overview(BillFilters(date_from=previous_start.isoformat(), date_to=previous_end.isoformat()))
+        current = self.overview(BillFilters(date_from=current_start.isoformat(), date_to=anchor.isoformat()), owner=owner)
+        previous = self.overview(BillFilters(date_from=previous_start.isoformat(), date_to=previous_end.isoformat()), owner=owner)
         change = None if previous["total_amount"] == 0 else round(
             (current["total_amount"] - previous["total_amount"]) / previous["total_amount"] * 100, 1)
         merged: dict[str, dict[str, Any]] = {}
@@ -433,7 +545,8 @@ class BillService:
             "by_category": by_category,
         }
 
-    def anomalies(self, days: int = 7, dimension: str = "spike", limit: int = 10) -> dict[str, Any]:
+    def anomalies(self, days: int = 7, dimension: str = "spike", limit: int = 10,
+                  owner: str | None = None) -> dict[str, Any]:
         days = min(max(1, days), 90)
         if dimension not in {"spike", "duplicate", "price_hike", "outlier"}:
             raise ToolError("dimension 必须是 spike、duplicate、price_hike 或 outlier")
@@ -443,7 +556,13 @@ class BillService:
             "hike_min_abs": HIKE_MIN_ABS, "hike_ratio": HIKE_RATIO,
         }
         with self._connect() as db:
-            latest = db.execute("SELECT MAX(substr(paid_at, 1, 10)) FROM transactions").fetchone()[0]
+            owner_where, owner_params = self._owner_where(owner)
+            owner_and, _ = self._owner_and(owner)
+            owner_and_tx, tx_params = self._owner_and(owner, "t.owner")
+            # 锚点=该 owner 数据的最新日期,避免窗口被别人的数据带偏
+            latest = db.execute(
+                f"SELECT MAX(substr(paid_at, 1, 10)) FROM transactions{owner_where}",
+                owner_params).fetchone()[0]
             if not latest:
                 return {"dimension": dimension, "days": days, "current_period": None, "previous_period": None,
                         "thresholds": thresholds, "items": []}
@@ -455,7 +574,7 @@ class BillService:
             previous_to = previous_end.isoformat()
             items: list[dict[str, Any]] = []
             if dimension == "spike":
-                for row in self.compare(days)["by_category"]:
+                for row in self.compare(days, owner=owner)["by_category"]:
                     if row["current"] >= SPIKE_MIN and row["current"] >= row["previous"] * SPIKE_RATIO:
                         items.append({
                             "name": row["name"],
@@ -466,9 +585,9 @@ class BillService:
                 items.sort(key=lambda item: -item["evidence"]["current_amount"])
             elif dimension == "duplicate":
                 rows = db.execute(
-                    """SELECT tx_id, merchant, amount, paid_at FROM transactions
-                       WHERE substr(paid_at, 1, 10) BETWEEN ? AND ? ORDER BY paid_at""",
-                    (current_from, current_to)).fetchall()
+                    f"""SELECT tx_id, merchant, amount, paid_at FROM transactions
+                        WHERE substr(paid_at, 1, 10) BETWEEN ? AND ?{owner_and} ORDER BY paid_at""",
+                    (current_from, current_to, *owner_params)).fetchall()
                 groups: dict[tuple[str, float], list[sqlite3.Row]] = {}
                 for row in rows:
                     groups.setdefault((row["merchant"], round(row["amount"], 2)), []).append(row)
@@ -491,11 +610,12 @@ class BillService:
                 items.sort(key=lambda item: (-len(item["evidence"]["tx_ids"]), item["name"]))
             elif dimension == "price_hike":
                 # 演示数据金额双峰,取窗口内该商户最近一笔实扣与预期比较
-                for sub in db.execute("SELECT * FROM subscriptions WHERE active=1 ORDER BY id"):
+                for sub in db.execute(
+                        f"SELECT * FROM subscriptions WHERE active=1{owner_and} ORDER BY id", owner_params):
                     row = db.execute(
-                        """SELECT amount, paid_at FROM transactions WHERE merchant=?
-                           AND substr(paid_at, 1, 10) BETWEEN ? AND ? ORDER BY paid_at DESC LIMIT 1""",
-                        (sub["merchant"], current_from, current_to)).fetchone()
+                        f"""SELECT amount, paid_at FROM transactions WHERE merchant=?
+                            AND substr(paid_at, 1, 10) BETWEEN ? AND ?{owner_and} ORDER BY paid_at DESC LIMIT 1""",
+                        (sub["merchant"], current_from, current_to, *owner_params)).fetchone()
                     if not row:
                         continue
                     expected, actual = sub["expected_amount"], row["amount"]
@@ -511,9 +631,10 @@ class BillService:
                 items.sort(key=lambda item: -abs(item["evidence"]["actual_amount"] - item["evidence"]["expected_amount"]))
             else:
                 rows = [dict(item) for item in db.execute(
-                    """SELECT t.tx_id, t.merchant, t.amount, t.paid_at, COALESCE(c.name, '未分类') AS category
-                       FROM transactions t LEFT JOIN categories c ON c.id=t.category_id
-                       WHERE substr(t.paid_at, 1, 10) BETWEEN ? AND ?""", (current_from, current_to))]
+                    f"""SELECT t.tx_id, t.merchant, t.amount, t.paid_at, COALESCE(c.name, '未分类') AS category
+                        FROM transactions t LEFT JOIN categories c ON c.id=t.category_id
+                        WHERE substr(t.paid_at, 1, 10) BETWEEN ? AND ?{owner_and_tx}""",
+                    (current_from, current_to, *tx_params))]
                 amounts: dict[str, list[float]] = {}
                 for row in rows:
                     amounts.setdefault(row["category"], []).append(row["amount"])
@@ -540,11 +661,12 @@ class BillService:
             "items": items[:min(max(1, limit), 30)],
         }
 
-    def query(self, filters: BillFilters | None = None, page: int = 1, page_size: int = 30) -> dict[str, Any]:
+    def query(self, filters: BillFilters | None = None, page: int = 1, page_size: int = 30,
+              owner: str | None = None) -> dict[str, Any]:
         filters = filters or BillFilters()
         page = max(1, page)
         page_size = min(max(1, page_size), 100)
-        where, params = self._where(filters)
+        where, params = self._where(filters, owner=owner)
         with self._connect() as db:
             total = db.execute(f"SELECT COUNT(*) FROM transactions t{where}", params).fetchone()[0]
             rows = db.execute(
@@ -560,7 +682,8 @@ class BillService:
         return result
 
     def samples(self, merchant: str | None = None, category: str | None = None, query: str | None = None,
-                limit: int = 10, date_from: str | None = None, date_to: str | None = None) -> dict[str, Any]:
+                limit: int = 10, date_from: str | None = None, date_to: str | None = None,
+                owner: str | None = None) -> dict[str, Any]:
         # 检索优先级:商户精确 > 类别 > 关键词
         if merchant:
             filters = BillFilters(merchant=merchant, date_from=date_from or "", date_to=date_to or "")
@@ -568,7 +691,7 @@ class BillService:
             filters = BillFilters(category=category, date_from=date_from or "", date_to=date_to or "")
         else:
             filters = BillFilters(query=query or "", date_from=date_from or "", date_to=date_to or "")
-        result = self.query(filters, 1, min(max(1, limit), 20))
+        result = self.query(filters, 1, min(max(1, limit), 20), owner=owner)
         samples = [{key: item[key] for key in ("tx_id", "paid_at", "merchant", "category", "amount", "note")}
                    for item in result["items"]]
         response = {"samples": samples, "matched": result["total"], "pii_masked": True}
@@ -576,96 +699,117 @@ class BillService:
             response["retry_hint"] = result["retry_hint"]
         return response
 
-    def categories(self) -> list[dict[str, Any]]:
+    def categories(self, owner: str | None = None) -> list[dict[str, Any]]:
         with self._connect() as db:
-            rows = db.execute("""SELECT c.id, c.name, c.keywords, c.enabled, c.created_at,
+            owner_where, owner_params = self._owner_where(owner, "c.owner")
+            rows = db.execute(f"""SELECT c.id, c.name, c.keywords, c.enabled, c.created_at,
                                  COUNT(t.tx_id) AS count FROM categories c
-                                 LEFT JOIN transactions t ON t.category_id=c.id
-                                 GROUP BY c.id ORDER BY count DESC, c.name""")
+                                 LEFT JOIN transactions t ON t.category_id=c.id{owner_where}
+                                 GROUP BY c.id ORDER BY count DESC, c.name""", owner_params)
             return [{**dict(row), "keywords": json.loads(row["keywords"])} for row in rows]
 
     def save_category(self, name: str, keywords: list[str], enabled: bool = True,
-                      category_id: int | None = None, operator: str = "web-user") -> dict[str, Any]:
-        name = name.strip()[:40]
+                      category_id: int | None = None, operator: str = "web-user",
+                      owner: str | None = None) -> dict[str, Any]:
+        name = name.strip()
         cleaned = list(dict.fromkeys(word.strip() for word in keywords if str(word).strip()))
         if not name:
             raise ToolError("类别名称不能为空")
+        if len(name) > 40:
+            raise ToolError("类别名不能超过 40 字符")
         now = _now()
         with self._connect() as db:
+            owner_and, owner_params = self._owner_and(owner)
             old: dict[str, Any] = {}
             action = "create"
             if category_id is not None:
-                row = db.execute("SELECT * FROM categories WHERE id=?", (category_id,)).fetchone()
+                row = db.execute(
+                    f"SELECT * FROM categories WHERE id=?{owner_and}",
+                    (category_id, *owner_params)).fetchone()
                 if not row:
                     raise ToolError(f"类别不存在:{category_id}")
                 old = {"name": row["name"], "keywords": json.loads(row["keywords"]), "enabled": bool(row["enabled"])}
                 try:
-                    db.execute("UPDATE categories SET name=?, keywords=?, enabled=? WHERE id=?",
-                               (name, json.dumps(cleaned, ensure_ascii=False), int(enabled), category_id))
+                    db.execute(f"UPDATE categories SET name=?, keywords=?, enabled=? WHERE id=?{owner_and}",
+                               (name, json.dumps(cleaned, ensure_ascii=False), int(enabled),
+                                category_id, *owner_params))
                 except sqlite3.IntegrityError as exc:
                     raise ToolError(f"类别名称已存在:{name}") from exc
                 action = "update"
             else:
                 try:
                     cursor = db.execute(
-                        "INSERT INTO categories(name, keywords, enabled, created_at) VALUES (?, ?, ?, ?)",
-                        (name, json.dumps(cleaned, ensure_ascii=False), int(enabled), now))
+                        "INSERT INTO categories(name, keywords, enabled, created_at, owner) VALUES (?, ?, ?, ?, ?)",
+                        (name, json.dumps(cleaned, ensure_ascii=False), int(enabled), now, owner))
                 except sqlite3.IntegrityError as exc:
                     raise ToolError(f"类别名称已存在:{name}") from exc
                 category_id = cursor.lastrowid
             new = {"name": name, "keywords": cleaned, "enabled": enabled}
             db.execute(
-                """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at)
-                   VALUES ('', 'category', ?, ?, ?)""",
+                """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at, owner)
+                   VALUES ('', 'category', ?, ?, ?, ?)""",
                 (operator, json.dumps({"rule_action": action, "id": category_id, "old": old, "new": new},
-                                      ensure_ascii=False), now))
+                                      ensure_ascii=False), now, owner))
         return {"id": category_id, **new, "created_at": now}
 
-    def delete_category(self, category_id: int, operator: str = "web-user") -> dict[str, Any]:
+    def delete_category(self, category_id: int, operator: str = "web-user",
+                        owner: str | None = None) -> dict[str, Any]:
         now = _now()
         with self._connect() as db:
-            row = db.execute("SELECT * FROM categories WHERE id=?", (category_id,)).fetchone()
+            owner_and, owner_params = self._owner_and(owner)
+            row = db.execute(
+                f"SELECT * FROM categories WHERE id=?{owner_and}",
+                (category_id, *owner_params)).fetchone()
             if not row:
                 raise ToolError(f"类别不存在:{category_id}")
             old = {"name": row["name"], "keywords": json.loads(row["keywords"]), "enabled": bool(row["enabled"])}
             # 引用该类别的交易置空,由 rematch_categories 或关键词规则重新归类
-            affected = db.execute("SELECT tx_id FROM transactions WHERE category_id=?", (category_id,)).fetchall()
-            db.execute("UPDATE transactions SET category_id=NULL WHERE category_id=?", (category_id,))
+            affected = db.execute(
+                f"SELECT tx_id FROM transactions WHERE category_id=?{owner_and}",
+                (category_id, *owner_params)).fetchall()
+            db.execute(f"UPDATE transactions SET category_id=NULL WHERE category_id=?{owner_and}",
+                       (category_id, *owner_params))
             db.execute(
-                """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at)
-                   VALUES ('', 'category', ?, ?, ?)""",
+                """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at, owner)
+                   VALUES ('', 'category', ?, ?, ?, ?)""",
                 (operator, json.dumps({"rule_action": "delete", "id": category_id, "old": old,
-                                       "unassigned": [item["tx_id"] for item in affected]}, ensure_ascii=False), now))
-            db.execute("DELETE FROM categories WHERE id=?", (category_id,))
+                                       "unassigned": [item["tx_id"] for item in affected]}, ensure_ascii=False), now, owner))
+            db.execute(f"DELETE FROM categories WHERE id=?{owner_and}", (category_id, *owner_params))
         return {"deleted": {"id": category_id, **old}, "unassigned": len(affected)}
 
-    def rematch_categories(self, operator: str = "web-user") -> dict[str, Any]:
+    def rematch_categories(self, operator: str = "web-user", owner: str | None = None) -> dict[str, Any]:
         now = _now()
         with self._connect() as db:
-            rules = self._category_rules(db)
+            rules = self._category_rules(db, owner)
+            owner_where, owner_params = self._owner_where(owner)
+            owner_and, _ = self._owner_and(owner)
             other_id = None
             changed = total = 0
-            for row in db.execute("SELECT tx_id, merchant, note, category_id FROM transactions").fetchall():
+            for row in db.execute(
+                    f"SELECT tx_id, merchant, note, category_id FROM transactions{owner_where}",
+                    owner_params).fetchall():
                 total += 1
                 haystack = f"{row['merchant']} {row['note']}".lower()
                 new_id = next((category_id for category_id, _, keywords in rules
                                if any(str(keyword).lower() in haystack for keyword in keywords)), None)
                 if new_id is None:
                     if other_id is None:
-                        other_id = self._ensure_category(db, "其他", now)
+                        other_id = self._ensure_category(db, "其他", now, owner)
                     new_id = other_id
                 if new_id != row["category_id"]:
-                    db.execute("UPDATE transactions SET category_id=? WHERE tx_id=?", (new_id, row["tx_id"]))
+                    db.execute(f"UPDATE transactions SET category_id=? WHERE tx_id=?{owner_and}",
+                               (new_id, row["tx_id"], *owner_params))
                     db.execute(
-                        """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at)
-                           VALUES (?, 'category', ?, ?, ?)""",
+                        """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at, owner)
+                           VALUES (?, 'category', ?, ?, ?, ?)""",
                         (row["tx_id"], operator,
-                         json.dumps({"category_id": new_id, "source": "rematch"}, ensure_ascii=False), now))
+                         json.dumps({"category_id": new_id, "source": "rematch"}, ensure_ascii=False), now, owner))
                     changed += 1
         return {"transactions": total, "changed": changed, "rule_count": len(rules)}
 
     def update_workflow(self, tx_ids: list[str], operator: str = "web-user",
-                        status: str | None = None, note: str = "") -> dict[str, Any]:
+                        status: str | None = None, note: str = "",
+                        owner: str | None = None) -> dict[str, Any]:
         ids = list(dict.fromkeys(str(item).strip() for item in tx_ids if str(item).strip()))
         if not ids:
             raise ToolError("至少选择一条交易")
@@ -677,87 +821,117 @@ class BillService:
         changes = {"status": status, "note": str(note or "").strip()}
         updated: list[str] = []
         with self._connect() as db:
+            owner_and, owner_params = self._owner_and(owner)
             for tx_id in ids:
-                row = db.execute("SELECT status FROM transactions WHERE tx_id=?", (tx_id,)).fetchone()
+                row = db.execute(
+                    f"SELECT status FROM transactions WHERE tx_id=?{owner_and}",
+                    (tx_id, *owner_params)).fetchone()
                 if not row:
                     continue
-                db.execute("UPDATE transactions SET status=? WHERE tx_id=?", (status, tx_id))
+                db.execute(f"UPDATE transactions SET status=? WHERE tx_id=?{owner_and}",
+                           (status, tx_id, *owner_params))
                 db.execute(
-                    """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at)
-                       VALUES (?, 'workflow', ?, ?, ?)""",
+                    """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at, owner)
+                       VALUES (?, 'workflow', ?, ?, ?, ?)""",
                     (tx_id, operator,
-                     json.dumps({"old_status": row["status"], **changes}, ensure_ascii=False), now))
+                     json.dumps({"old_status": row["status"], **changes}, ensure_ascii=False), now, owner))
                 updated.append(tx_id)
         return {"updated_tx_ids": updated, "count": len(updated), "changes": changes, "operator": operator}
 
-    def transaction_audits(self, tx_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    def transaction_audits(self, tx_id: str, limit: int = 50,
+                           owner: str | None = None) -> list[dict[str, Any]]:
         with self._connect() as db:
+            # 审计行自带 owner 戳,必须按 owner 过滤:同号交易可在多个 owner
+            # 名下,只按交易归属过滤会把他人审计(operator/note)一并带出
+            audit_and, audit_params = self._owner_and(owner, "a.owner")
+            owner_and, owner_params = self._owner_and(owner, "t.owner")
+            # EXISTS 保证审计仍对应本视野内存在的交易,且避免 JOIN 拉出重复审计行
             return [dict(row) for row in db.execute(
-                "SELECT * FROM tx_audits WHERE tx_id=? ORDER BY id LIMIT ?",
-                (tx_id, min(max(1, limit), 200)))]
+                f"""SELECT a.* FROM tx_audits a WHERE a.tx_id=?{audit_and} AND EXISTS
+                    (SELECT 1 FROM transactions t WHERE t.tx_id=a.tx_id{owner_and})
+                    ORDER BY a.id LIMIT ?""",
+                (tx_id, *audit_params, *owner_params, min(max(1, limit), 200)))]
 
-    def recent_audits(self, limit: int = 50) -> list[dict[str, Any]]:
+    def recent_audits(self, limit: int = 50, owner: str | None = None) -> list[dict[str, Any]]:
         """最近的全量审计记录(类别规则 / 核查状态 / 订阅),供看板展示。"""
         with self._connect() as db:
+            owner_where, owner_params = self._owner_where(owner)
             return [dict(row) for row in db.execute(
-                "SELECT * FROM tx_audits ORDER BY id DESC LIMIT ?",
-                (min(max(1, limit), 200),))]
+                f"SELECT * FROM tx_audits{owner_where} ORDER BY id DESC LIMIT ?",
+                (*owner_params, min(max(1, limit), 200)))]
 
-    def imports(self, limit: int = 20) -> list[dict[str, Any]]:
+    def imports(self, limit: int = 20, owner: str | None = None) -> list[dict[str, Any]]:
         """最近导入批次;账单与订阅 CSV 共用 imports 表。"""
         with self._connect() as db:
+            owner_where, owner_params = self._owner_where(owner)
             return [dict(row) for row in db.execute(
-                "SELECT * FROM imports ORDER BY id DESC LIMIT ?",
-                (min(max(1, limit), 100),))]
+                f"SELECT * FROM imports{owner_where} ORDER BY id DESC LIMIT ?",
+                (*owner_params, min(max(1, limit), 100),))]
 
     def update_transaction_category(self, tx_id: str, category: str,
-                                    operator: str = "web-user") -> dict[str, Any]:
+                                    operator: str = "web-user",
+                                    owner: str | None = None) -> dict[str, Any]:
         """人工改判单笔交易的类别;类别不存在则即时创建,并写入审计。"""
         tx_id = str(tx_id).strip()
-        category = str(category).strip()[:40]
+        category = str(category).strip()
         if not tx_id or not category:
             raise ToolError("tx_id 和 category 不能为空")
+        if len(category) > 40:
+            raise ToolError("类别名不能超过 40 字符")
         now = _now()
         with self._connect() as db:
+            # 别名片段只用于带 t 别名的 SELECT;UPDATE 语句无别名,须用裸 owner 片段
+            owner_and, owner_params = self._owner_and(owner, "t.owner")
+            owner_and_plain, plain_params = self._owner_and(owner)
             row = db.execute(
-                """SELECT t.tx_id, COALESCE(c.name, '未分类') AS category FROM transactions t
-                   LEFT JOIN categories c ON c.id=t.category_id WHERE t.tx_id=?""",
-                (tx_id,)).fetchone()
+                f"""SELECT t.tx_id, COALESCE(c.name, '未分类') AS category FROM transactions t
+                   LEFT JOIN categories c ON c.id=t.category_id WHERE t.tx_id=?{owner_and}""",
+                (tx_id, *owner_params)).fetchone()
             if not row:
                 raise ToolError(f"交易不存在:{tx_id}")
-            category_id = self._ensure_category(db, category, now)
-            db.execute("UPDATE transactions SET category_id=? WHERE tx_id=?", (category_id, tx_id))
+            category_id = self._ensure_category(db, category, now, owner)
+            db.execute(f"UPDATE transactions SET category_id=? WHERE tx_id=?{owner_and_plain}",
+                       (category_id, tx_id, *plain_params))
             db.execute(
-                """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at)
-                   VALUES (?, 'category', ?, ?, ?)""",
+                """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at, owner)
+                   VALUES (?, 'category', ?, ?, ?, ?)""",
                 (tx_id, operator,
                  json.dumps({"old_category": row["category"], "new_category": category,
-                             "source": "manual"}, ensure_ascii=False), now))
+                             "source": "manual"}, ensure_ascii=False), now, owner))
         return {"tx_id": tx_id, "old_category": row["category"], "new_category": category,
                 "operator": operator}
 
-    def subscriptions(self) -> list[dict[str, Any]]:
+    def subscriptions(self, owner: str | None = None) -> list[dict[str, Any]]:
         with self._connect() as db:
+            owner_where, owner_params = self._owner_where(owner, "s.owner")
+            owner_and_tx, tx_params = self._owner_and(owner, "t.owner")
             rows = db.execute(
-                """SELECT s.*, (SELECT MAX(t.paid_at) FROM transactions t WHERE t.merchant=s.merchant) AS last_paid_at
-                   FROM subscriptions s ORDER BY s.id""")
+                f"""SELECT s.*, (SELECT MAX(t.paid_at) FROM transactions t
+                    WHERE t.merchant=s.merchant{owner_and_tx}) AS last_paid_at
+                   FROM subscriptions s{owner_where} ORDER BY s.id""", [*tx_params, *owner_params])
             return [{**dict(row), "active": bool(row["active"])} for row in rows]
 
-    def set_subscription_active(self, subscription_id: int, active: bool, operator: str = "web-user") -> dict[str, Any]:
+    def set_subscription_active(self, subscription_id: int, active: bool, operator: str = "web-user",
+                                owner: str | None = None) -> dict[str, Any]:
         now = _now()
         with self._connect() as db:
-            row = db.execute("SELECT * FROM subscriptions WHERE id=?", (subscription_id,)).fetchone()
+            owner_and, owner_params = self._owner_and(owner)
+            row = db.execute(
+                f"SELECT * FROM subscriptions WHERE id=?{owner_and}",
+                (subscription_id, *owner_params)).fetchone()
             if not row:
                 raise ToolError(f"订阅不存在:{subscription_id}")
-            db.execute("UPDATE subscriptions SET active=? WHERE id=?", (int(bool(active)), subscription_id))
+            db.execute(f"UPDATE subscriptions SET active=? WHERE id=?{owner_and}",
+                       (int(bool(active)), subscription_id, *owner_params))
             db.execute(
-                """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at)
-                   VALUES ('', 'subscription', ?, ?, ?)""",
+                """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at, owner)
+                   VALUES ('', 'subscription', ?, ?, ?, ?)""",
                 (operator, json.dumps({"id": subscription_id, "name": row["name"],
-                                       "active": bool(active)}, ensure_ascii=False), now))
+                                       "active": bool(active)}, ensure_ascii=False), now, owner))
             return {**dict(row), "active": bool(active)}
 
-    def save_report(self, session_id: str, title: str, content: str) -> dict[str, Any]:
+    def save_report(self, session_id: str, title: str, content: str,
+                    owner: str | None = None) -> dict[str, Any]:
         title = title.strip()[:160]
         content = content.strip()
         if not title or not content:
@@ -765,28 +939,33 @@ class BillService:
         created_at = _now()
         with self._connect() as db:
             cursor = db.execute(
-                "INSERT INTO reports(session_id, title, content, created_at) VALUES (?, ?, ?, ?)",
-                (session_id, title, content, created_at))
+                "INSERT INTO reports(session_id, title, content, created_at, owner) VALUES (?, ?, ?, ?, ?)",
+                (session_id, title, content, created_at, owner))
             report_id = cursor.lastrowid
         return {"id": report_id, "session_id": session_id, "title": title, "content": content, "created_at": created_at}
 
-    def reports(self, limit: int = 50) -> list[dict[str, Any]]:
+    def reports(self, limit: int = 50, owner: str | None = None) -> list[dict[str, Any]]:
         with self._connect() as db:
+            owner_where, owner_params = self._owner_where(owner)
             return [dict(row) for row in db.execute(
-                "SELECT id, session_id, title, content, created_at FROM reports ORDER BY id DESC LIMIT ?",
-                (min(max(1, limit), 200),))]
+                f"SELECT id, session_id, title, content, created_at FROM reports{owner_where}"
+                " ORDER BY id DESC LIMIT ?",
+                (*owner_params, min(max(1, limit), 200)))]
 
-    def delete_report(self, report_id: int) -> dict[str, Any]:
+    def delete_report(self, report_id: int, owner: str | None = None) -> dict[str, Any]:
         with self._connect() as db:
-            row = db.execute("SELECT id, title FROM reports WHERE id=?", (report_id,)).fetchone()
+            owner_and, owner_params = self._owner_and(owner)
+            row = db.execute(
+                f"SELECT id, title FROM reports WHERE id=?{owner_and}",
+                (report_id, *owner_params)).fetchone()
             if not row:
                 raise ToolError(f"报告不存在:{report_id}")
-            db.execute("DELETE FROM reports WHERE id=?", (report_id,))
+            db.execute(f"DELETE FROM reports WHERE id=?{owner_and}", (report_id, *owner_params))
         return {"deleted": {"id": row["id"], "title": row["title"]}}
 
-    def export_csv(self, filters: BillFilters | None = None) -> str:
+    def export_csv(self, filters: BillFilters | None = None, owner: str | None = None) -> str:
         filters = filters or BillFilters()
-        where, params = self._where(filters)
+        where, params = self._where(filters, owner=owner)
         output = io.StringIO()
         writer = csv.writer(output, lineterminator="\n")
         writer.writerow(EXPORT_HEADER)
@@ -798,3 +977,66 @@ class BillService:
             for row in rows:
                 writer.writerow(tuple(row))
         return "\ufeff" + output.getvalue()
+
+    def for_user(self, owner: str) -> "_ScopedBills":
+        owner = owner.strip()
+        if not owner:
+            raise ToolError("owner 不能为空")
+        self._ensure_user_categories(owner)
+        return _ScopedBills(self, owner)
+
+    def scoped_or_legacy(self, owner: str = "") -> "_ScopedBills":
+        """MCP bill 服务器的数据边界原语。
+
+        非空 owner 与 for_user 同义(本人视图 + 默认类别播种);空串在这里是
+        合法边界——“仅存量 NULL 行”(_owner_clause 的空串分支),对应服务器端
+        未注入身份时的默认形态。for_user 拒绝空 owner(web 层的真实身份不允许
+        为空),所以这里直接构造 _ScopedBills(self, "") 表达 NULL-only 语义,
+        仅限服务端注入链路使用,不经用户输入直取。"""
+        owner = str(owner or "").strip()
+        if owner:
+            return self.for_user(owner)
+        return _ScopedBills(self, "")
+
+    def _ensure_user_categories(self, owner: str) -> None:
+        """首次访问时为无任何类别的 owner 播种默认类别副本(带 owner 戳)。"""
+        with self._connect() as db:
+            clause, params = self._owner_clause(owner)
+            if db.execute(f"SELECT 1 FROM categories WHERE {clause} LIMIT 1", params).fetchone():
+                return
+            now = _now()
+            db.executemany(
+                "INSERT INTO categories(name, keywords, enabled, created_at, owner) VALUES (?, ?, 1, ?, ?)",
+                [(name, json.dumps([x.strip() for x in k.split(",")], ensure_ascii=False), now, owner)
+                 for name, k in DEFAULT_CATEGORIES])
+
+
+class _ScopedBills:
+    """BillService 的按用户受限视图:查询自动过滤,写入自动盖戳。"""
+
+    _METHODS = ("overview", "compare", "anomalies", "query", "samples",
+                "categories", "save_category", "delete_category",
+                "rematch_categories", "update_workflow", "transaction_audits",
+                "subscriptions", "set_subscription_active", "import_bills",
+                "import_subscriptions", "reports", "save_report",
+                "delete_report", "export_csv", "update_transaction_category",
+                "imports", "recent_audits")
+
+    def __init__(self, service: "BillService", owner: str) -> None:
+        self._service = service
+        self._owner = owner
+
+    def mask_pii(self, text: str) -> tuple[str, dict[str, int]]:
+        """脱敏是与 owner 无关的纯文本函数,直接透传(不注入 owner)。"""
+        return BillService.mask_pii(text)
+
+    def __getattr__(self, name: str):
+        if name not in _ScopedBills._METHODS:
+            raise AttributeError(name)
+        method = getattr(self._service, name)
+
+        def bound(*args, **kwargs):
+            kwargs["owner"] = self._owner
+            return method(*args, **kwargs)
+
+        return bound

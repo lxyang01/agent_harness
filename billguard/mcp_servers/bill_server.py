@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from ..bills import (
+    DEFAULT_CATEGORIES,
     DUPLICATE_WINDOW_DAYS,
     HIKE_MIN_ABS,
     HIKE_RATIO,
@@ -55,9 +56,10 @@ def build_server(data_dir: str | Path) -> FastMCP:
                   category: str | None = None, merchant: str | None = None,
                   method: str | None = None, status: str | None = None,
                   min_amount: float | None = None, max_amount: float | None = None,
-                  query: str | None = None) -> dict[str, Any]:
+                  query: str | None = None, owner: str = "") -> dict[str, Any]:
         """聚合账单总金额、笔数、待核查数量、日均支出、类别分布和高频商户。"""
-        return service.overview(_filters(
+        scoped = service.scoped_or_legacy(owner)
+        return scoped.overview(_filters(
             date_from, date_to, category, merchant, method, status,
             min_amount, max_amount, query,
         ))
@@ -67,46 +69,49 @@ def build_server(data_dir: str | Path) -> FastMCP:
               category: str | None = None, merchant: str | None = None,
               method: str | None = None, status: str | None = None,
               min_amount: float | None = None, max_amount: float | None = None,
-              query: str | None = None, limit: int = 20) -> dict[str, Any]:
+              query: str | None = None, limit: int = 20,
+              owner: str = "") -> dict[str, Any]:
         """按时间、类别、商户、金额区间或关键词查询最多 50 条脱敏交易；关键词同时匹配交易编号、商户、备注和类别。"""
-        result = service.query(_filters(
+        scoped = service.scoped_or_legacy(owner)
+        result = scoped.query(_filters(
             date_from, date_to, category, merchant, method, status,
             min_amount, max_amount, query,
         ), page=1, page_size=min(max(limit, 1), 50))
         result["items"] = [
-            {**item, "note": service.mask_pii(item["note"])[0]} for item in result["items"]
+            {**item, "note": scoped.mask_pii(item["note"])[0]} for item in result["items"]
         ]
         result["pii_masked"] = True
         return result
 
     @server.tool(name="compare_periods", annotations=READ_ONLY, structured_output=True)
-    def compare_periods(days: int = 7) -> dict[str, Any]:
+    def compare_periods(days: int = 7, owner: str = "") -> dict[str, Any]:
         """将最近 N 天支出与此前等长周期进行确定性比较。"""
         if days < 1 or days > 365:
             raise ValueError("days 必须在 1 到 365 之间")
-        return service.compare(days)
+        return service.scoped_or_legacy(owner).compare(days)
 
     @server.tool(name="detect_anomalies", annotations=READ_ONLY, structured_output=True)
     def detect_anomalies(days: int = 7,
                          dimension: Literal["spike", "duplicate", "price_hike", "outlier"] = "spike",
-                         limit: int = 10) -> dict[str, Any]:
+                         limit: int = 10, owner: str = "") -> dict[str, Any]:
         """识别四类账单异常：类别激增、疑似重复扣费、订阅涨价和大额离群。"""
         if days < 1 or days > 365:
             raise ValueError("days 必须在 1 到 365 之间")
         if limit < 1 or limit > 50:
             raise ValueError("limit 必须在 1 到 50 之间")
-        return service.anomalies(days, dimension, limit)
+        return service.scoped_or_legacy(owner).anomalies(days, dimension, limit)
 
     @server.tool(name="get_samples", annotations=READ_ONLY, structured_output=True)
     def get_samples(merchant: str | None = None, category: str | None = None,
                     query: str | None = None, limit: int = 10,
                     date_from: str | None = None,
-                    date_to: str | None = None) -> dict[str, Any]:
+                    date_to: str | None = None, owner: str = "") -> dict[str, Any]:
         """读取最多 20 条已脱敏代表性交易；具体问题优先传 merchant，其次 category，零结果时按 retry_hint 放宽一次查询。"""
         if limit < 1 or limit > 20:
             raise ValueError("limit 必须在 1 到 20 之间")
-        return service.samples(merchant=merchant, category=category, query=query,
-                               limit=limit, date_from=date_from, date_to=date_to)
+        return service.scoped_or_legacy(owner).samples(
+            merchant=merchant, category=category, query=query,
+            limit=limit, date_from=date_from, date_to=date_to)
 
     @server.tool(
         name="update_status", annotations=WRITE, structured_output=True,
@@ -115,13 +120,14 @@ def build_server(data_dir: str | Path) -> FastMCP:
     )
     def update_status(tx_ids: list[str],
                       status: Literal[WORKFLOW_STATUSES],
-                      operator: str, note: str = "") -> dict[str, Any]:
+                      operator: str, note: str = "", owner: str = "") -> dict[str, Any]:
         """更新交易核查状态。这是写操作，MCP Host 必须在调用前获得用户批准。"""
         if not tx_ids or len(tx_ids) > 100:
             raise ValueError("tx_ids 必须包含 1 到 100 个交易编号")
         if not operator.strip():
             raise ValueError("operator 不能为空")
-        return service.update_workflow(tx_ids, operator.strip(), status=status, note=note)
+        return service.scoped_or_legacy(owner).update_workflow(
+            tx_ids, operator.strip(), status=status, note=note)
 
     @server.resource(
         "bill://schema", name="bill-schema", mime_type="application/json",
@@ -144,14 +150,16 @@ def build_server(data_dir: str | Path) -> FastMCP:
 
     @server.resource(
         "bill://categories", name="bill-categories", mime_type="application/json",
-        description="当前启用的账单类别及匹配关键词。",
+        description="账单类目目录:名称、关键词与启用位(静态、与 owner 无关)。",
     )
     def bill_categories() -> str:
+        # §4:类别资源是 owner 无关的静态目录,只含 name/keywords/enabled,
+        # 不查库——任何 owner 的个性化名称/关键词与计数都不经此资源泄露
         return json.dumps({
             "categories": [
-                {"name": item["name"], "keywords": item["keywords"],
-                 "enabled": item["enabled"], "count": item["count"]}
-                for item in service.categories()
+                {"name": name, "keywords": [word.strip() for word in keywords.split(",")],
+                 "enabled": True}
+                for name, keywords in DEFAULT_CATEGORIES
             ],
         }, ensure_ascii=False)
 
