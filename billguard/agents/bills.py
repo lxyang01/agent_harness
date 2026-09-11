@@ -185,9 +185,11 @@ class BillMockLLM:
             return json.dumps({"thought": "根据真实工具结果回答", "final": answer}, ensure_ascii=False)
 
         text = str(last.get("content", ""))
-        if any(word in text for word in ("异常", "涨价", "重复扣费", "盗刷")):
+        if any(word in text for word in ("异常", "涨价", "重复", "盗刷")):
+            # 演示故事线在 8 月上旬,窗口需覆盖到数据最大日 2026-08-31 往前 31 天
+            dimension = "duplicate" if "重复" in text else "price_hike"
             return self._call(self._available(tools, "bill_anomalies", "bill.detect_anomalies"),
-                              {"days": 7, "dimension": "price_hike", "limit": 10})
+                              {"days": 31, "dimension": dimension, "limit": 10})
         if any(word in text for word in ("对比", "环比", "变化")):
             days = 30 if "30" in text or "月" in text else 7
             return self._call(self._available(tools, "bill_compare", "bill.compare_periods"),

@@ -34,6 +34,15 @@ class MockLLMTests(unittest.TestCase):
             [{"name": n} for n in ("bill_overview", "bill_anomalies")]))
         self.assertEqual("bill_anomalies", decision["tool_call"]["name"])
         self.assertEqual("price_hike", decision["tool_call"]["arguments"]["dimension"])
+        self.assertEqual(31, decision["tool_call"]["arguments"]["days"])
+
+    def test_mock_routes_duplicate_question_to_duplicate_dimension(self):
+        llm = BillMockLLM()
+        decision = json.loads(llm.complete(
+            [{"role": "user", "content": "有没有重复扣费"}],
+            [{"name": n} for n in ("bill_overview", "bill_anomalies")]))
+        self.assertEqual("bill_anomalies", decision["tool_call"]["name"])
+        self.assertEqual("duplicate", decision["tool_call"]["arguments"]["dimension"])
 
 
 if __name__ == "__main__":

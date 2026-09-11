@@ -44,7 +44,7 @@ class BillGuardApp:
                  authenticator: Any = None,
                  max_concurrent_llm: int = 4) -> None:
         if max_concurrent_llm < 1:
-            raise ValueError("max_concurrent_llm must be >= 1")
+            raise ValueError("max_concurrent_llm 必须不小于 1")
         self.data_dir = Path(data_dir)
         guard_root = self.data_dir / "billguard"
         self.session_dir = guard_root / "sessions"
@@ -219,11 +219,11 @@ class BillGuardApp:
             raise PermissionDenied("当前角色无审批权限")
         self._require_session_access(user, session_id)
         if self.policy_gateway is None:
-            raise PolicyError("approval workflow is not enabled")
+            raise PolicyError("审批工作流未启用")
         approval_id = str(body.get("approval_id", "")).strip()
         decision = str(body.get("decision", "")).strip().lower()
         if not approval_id or decision not in {"approve", "reject"}:
-            raise PolicyError("approval_id and decision (approve or reject) are required")
+            raise PolicyError("approval_id 与 decision(approve 或 reject)不能为空")
         if not self._llm_slots.acquire(blocking=False):
             raise BusyError("服务繁忙,请稍后重试")
         try:
@@ -239,7 +239,7 @@ class BillGuardApp:
         with self._lock(session_id):
             current = self.policy_gateway.store.get(approval_id)
             if current.session_id != session_id:
-                raise PolicyError("approval does not belong to this session")
+                raise PolicyError("该审批不属于当前会话")
             approved = decision == "approve"
             decided_by = user.username  # 服务端身份,忽略请求体中的 decided_by
 
@@ -248,7 +248,7 @@ class BillGuardApp:
             if current.tool_name.endswith("commit_issue") and self.work_item_store is not None:
                 remote_approval_id = str(current.arguments.get("approval_id", "")).strip()
                 if not remote_approval_id:
-                    raise PolicyError("commit_issue approval has no remote approval_id")
+                    raise PolicyError("commit_issue 审批缺少远程 approval_id")
                 self.work_item_store.decide(remote_approval_id, approved, decided_by)
 
             decided = self.policy_gateway.store.decide(
@@ -354,7 +354,7 @@ class BillGuardApp:
         filename = str(body.get("filename", "bills.csv")).strip() or "bills.csv"
         csv_text = body.get("csv_text")
         if not isinstance(csv_text, str):
-            raise ValueError("csv_text is required")
+            raise ValueError("csv_text 不能为空")
         result = self.bills.import_bills(filename, csv_text)
         payload: dict[str, Any] = {
             "result": result,
@@ -374,14 +374,14 @@ class BillGuardApp:
         tx_id = str(body.get("tx_id", "")).strip()
         category = str(body.get("category", "")).strip()
         if not tx_id or not category:
-            raise ValueError("tx_id and category are required")
+            raise ValueError("tx_id 与 category 不能为空")
         result = self.bills.update_transaction_category(tx_id, category, user.username)
         return {"result": result, "categories": self.bills.categories(), "audits": self.bills.recent_audits()}
 
     def save_category(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
         keywords = body.get("keywords", [])
         if not isinstance(keywords, list):
-            raise ValueError("keywords must be an array")
+            raise ValueError("keywords 必须是数组")
         result = self.bills.save_category(
             str(body.get("name", "")), [str(item) for item in keywords], bool(body.get("enabled", True)),
             int(body["category_id"]) if body.get("category_id") is not None else None, user.username,
@@ -400,7 +400,7 @@ class BillGuardApp:
         tx_ids = body.get("tx_ids", [])
         updates = body.get("updates", {})
         if not isinstance(tx_ids, list) or not isinstance(updates, dict):
-            raise ValueError("tx_ids and updates are required")
+            raise ValueError("tx_ids 必须是数组,updates 必须是对象")
         updates.pop("operator", None)  # 身份一律取服务端,防止与 kwarg 冲突
         status = str(updates.get("status") or "").strip()
         note = str(updates.get("note") or "").strip()
@@ -520,12 +520,12 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
         def _body(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length", "0"))
             if length < 0:
-                raise ValueError("invalid Content-Length")
+                raise ValueError("Content-Length 无效")
             if length > MAX_HTTP_REQUEST_BYTES:
-                raise ValueError("request body is too large")
+                raise ValueError("请求体过大")
             value = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(value, dict):
-                raise ValueError("JSON body must be an object")
+                raise ValueError("JSON 请求体必须是对象")
             return value
 
         def _static(self, request_path: str) -> None:
@@ -601,13 +601,13 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
                     return
                 session_id = str(body.get("session_id", "default")).strip()
                 if not session_id:
-                    raise ValueError("session_id is required")
+                    raise ValueError("session_id 不能为空")
                 if self.path == "/api/snapshot":
                     result = app.snapshot(user, session_id)
                 elif self.path == "/api/chat":
                     message = str(body.get("message", "")).strip()
                     if not message:
-                        raise ValueError("message is required")
+                        raise ValueError("message 不能为空")
                     result = app.chat(user, session_id, message)
                 elif self.path == "/api/bills/overview":
                     result = app.bill_overview(body)
