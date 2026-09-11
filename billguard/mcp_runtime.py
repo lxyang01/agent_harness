@@ -57,6 +57,15 @@ class _Connection:
     snapshot: MCPServerSnapshot
 
 
+def _make_handler(manager: "MCPClientManager", server: str, tool: str) -> Callable[..., Any]:
+    """闭包工厂:handler 只接受 **arguments,没有任何具名参数——模型显式传
+    _server/_tool 同名关键字无处绑定,无法重路由到其他服务器/工具(与
+    web._make_owner_wrapper 同构)。"""
+    def handler(**arguments: Any) -> Any:
+        return manager.call_tool(server, tool, arguments)
+    return handler
+
+
 class MCPClientManager:
     """Persistent MCP connections behind a synchronous, timeout-bounded facade."""
 
@@ -107,16 +116,11 @@ class MCPClientManager:
         registered: list[str] = []
         for remote in snapshot.tools:
             local_name = f"{server_name}.{remote.name}"
-
-            def handler(_server: str = server_name, _tool: str = remote.name,
-                        **arguments: Any) -> Any:
-                return self.call_tool(_server, _tool, arguments)
-
             registry.register(Tool(
                 local_name,
                 f"[MCP:{server_name}] {remote.description}".strip(),
                 remote.input_schema,
-                handler,
+                _make_handler(self, server_name, remote.name),
                 policy=remote.policy,
             ))
             registered.append(local_name)

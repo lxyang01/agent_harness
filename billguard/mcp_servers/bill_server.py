@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from ..bills import (
+    DEFAULT_CATEGORIES,
     DUPLICATE_WINDOW_DAYS,
     HIKE_MIN_ABS,
     HIKE_RATIO,
@@ -149,14 +150,16 @@ def build_server(data_dir: str | Path) -> FastMCP:
 
     @server.resource(
         "bill://categories", name="bill-categories", mime_type="application/json",
-        description="当前启用的账单类别及匹配关键词。",
+        description="账单类目目录:名称、关键词与启用位(静态、与 owner 无关)。",
     )
     def bill_categories() -> str:
+        # §4:类别资源是 owner 无关的静态目录,只含 name/keywords/enabled,
+        # 不查库——任何 owner 的个性化名称/关键词与计数都不经此资源泄露
         return json.dumps({
             "categories": [
-                {"name": item["name"], "keywords": item["keywords"],
-                 "enabled": item["enabled"], "count": item["count"]}
-                for item in service.categories()
+                {"name": name, "keywords": [word.strip() for word in keywords.split(",")],
+                 "enabled": True}
+                for name, keywords in DEFAULT_CATEGORIES
             ],
         }, ensure_ascii=False)
 

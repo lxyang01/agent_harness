@@ -36,13 +36,16 @@ class BusyError(RuntimeError):
     """429: all model-concurrency slots are taken; retry shortly."""
 
 
-def _make_owner_wrapper(original: Any, owner: str, allowed: frozenset[str]) -> Any:
+def _make_owner_wrapper(original: Any, owner: str, allowed: frozenset[str],
+                        identities: frozenset[str]) -> Any:
     """闭包工厂:wrapper 只接受 **arguments,没有任何具名参数——模型显式传
     同名关键字(如 {"_owner": "admin"})无处绑定,无法覆盖注入身份;
-    同时按 Schema 过滤参数,未知键(含 _server/_tool 等内部键)一律丢弃。"""
+    同时按 Schema 过滤参数,未知键(含 _server/_tool 等内部键)一律丢弃。
+    identities 中的身份键(owner/operator)一律强制覆盖为服务端身份。"""
     def wrapped(**arguments: Any) -> Any:
         arguments = {key: value for key, value in arguments.items() if key in allowed}
-        arguments["owner"] = owner  # 服务端身份强制覆盖,防伪造跨 owner 访问
+        for key in identities:
+            arguments[key] = owner  # 服务端身份强制覆盖,防伪造跨 owner/操作者
         return original(**arguments)
     return wrapped
 
@@ -52,8 +55,10 @@ def inject_owner_identity(registry: ToolRegistry, username: str) -> ToolRegistry
 
     - handler 包装(_make_owner_wrapper):arguments["owner"] 一律覆盖为服务端
       身份,模型伪造的 owner(如他人用户名)在到达 MCP 服务器前就被覆盖;
+      声明了 operator 参数的工具(update_status)同样注入登录用户为 operator;
       wrapper 无具名参数且按 Schema 过滤参数,具名参数覆盖类攻击无效;
-    - Schema 隐藏:properties/required 移除 owner,模型侧根本看不到该参数;
+    - Schema 隐藏:properties/required 移除身份键(owner/operator),模型侧
+      根本看不到这些参数;
     - 非 bill.* 工具(如 work-items.*)原样透传,不受影响。
 
     返回替换后的新注册表;入参注册表保持不变,需要恢复时直接弃用返回值即可。
@@ -64,15 +69,19 @@ def inject_owner_identity(registry: ToolRegistry, username: str) -> ToolRegistry
         if name.startswith("bill."):
             parameters = copy.deepcopy(tool.parameters)
             properties = parameters.get("properties")
+            # 身份键:owner 一律注入;operator 仅当工具声明该参数(update_status)
+            identities = frozenset({"owner"})
             if isinstance(properties, dict):
-                properties.pop("owner", None)
+                identities = identities | ({"operator"} & set(properties))
+                for key in identities:
+                    properties.pop(key, None)
             if isinstance(parameters.get("required"), list):
                 parameters["required"] = [key for key in parameters["required"]
-                                          if key != "owner"]
+                                          if key not in identities]
             allowed = frozenset(properties) if isinstance(properties, dict) else frozenset()
             tool = replace(
                 tool,
-                handler=_make_owner_wrapper(tool.handler, username, allowed),
+                handler=_make_owner_wrapper(tool.handler, username, allowed, identities),
                 parameters=parameters,
             )
         injected.register(tool)

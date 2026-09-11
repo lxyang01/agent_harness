@@ -841,13 +841,16 @@ class BillService:
     def transaction_audits(self, tx_id: str, limit: int = 50,
                            owner: str | None = None) -> list[dict[str, Any]]:
         with self._connect() as db:
+            # 审计行自带 owner 戳,必须按 owner 过滤:同号交易可在多个 owner
+            # 名下,只按交易归属过滤会把他人审计(operator/note)一并带出
+            audit_and, audit_params = self._owner_and(owner, "a.owner")
             owner_and, owner_params = self._owner_and(owner, "t.owner")
-            # 同号交易可在多个 owner 名下,EXISTS 避免 JOIN 拉出重复审计行
+            # EXISTS 保证审计仍对应本视野内存在的交易,且避免 JOIN 拉出重复审计行
             return [dict(row) for row in db.execute(
-                f"""SELECT a.* FROM tx_audits a WHERE a.tx_id=? AND EXISTS
+                f"""SELECT a.* FROM tx_audits a WHERE a.tx_id=?{audit_and} AND EXISTS
                     (SELECT 1 FROM transactions t WHERE t.tx_id=a.tx_id{owner_and})
                     ORDER BY a.id LIMIT ?""",
-                (tx_id, *owner_params, min(max(1, limit), 200)))]
+                (tx_id, *audit_params, *owner_params, min(max(1, limit), 200)))]
 
     def recent_audits(self, limit: int = 50, owner: str | None = None) -> list[dict[str, Any]]:
         """最近的全量审计记录(类别规则 / 核查状态 / 订阅),供看板展示。"""

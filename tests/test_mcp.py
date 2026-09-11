@@ -84,6 +84,9 @@ BG-004,2026-09-05 20:00:00,爱奇艺,订阅,35.0,支付宝,视频会员自动续
         self.assertIn("tx_id", str(schema))
         categories = self.manager.read_resource("bill", "bill://categories")
         self.assertIn("餐饮", str(categories))
+        # §4:类别资源是 owner 无关的静态目录——无计数、无个性化规则
+        self.assertNotIn("count", str(categories))
+        self.assertIn("饿了么", str(categories))
         prompt = self.manager.get_prompt(
             "bill", "investigate-bill-anomaly", {"days": "7", "dimension": "price_hike"},
         )
@@ -226,6 +229,16 @@ class BillServerOwnerScopeTests(unittest.TestCase):
                 self.assertEqual(100.0, result["total_amount"])
                 self.assertEqual({"水费中心", "电费中心"},
                                  {item["name"] for item in result["top_merchants"]})
+
+    def test_categories_resource_is_static_and_owner_agnostic(self):
+        # §4:bill://categories 返回静态默认类目目录(name/keywords/enabled),
+        # 不查库、不含计数,任何 owner 的个性化规则都不进资源
+        BillService(self.bills_dir).for_user("alice").save_category("私人定制类", ["专属关键词"])
+        payload = str(self.manager.read_resource("bill", "bill://categories"))
+        self.assertIn("餐饮", payload)          # 默认目录仍在
+        self.assertNotIn("私人定制类", payload)  # 个性化规则不泄露
+        self.assertNotIn("专属关键词", payload)
+        self.assertNotIn("count", payload)      # 无跨 owner 计数
 
     def test_named_owner_sees_only_own_rows(self):
         result = self.manager.call_tool("bill", "aggregate", {"owner": "alice"})

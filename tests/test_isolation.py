@@ -5,12 +5,17 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from billguard.bills import BillService
+from billguard.mcp_runtime import MCPClientManager
 from billguard.tools import Tool, ToolError, ToolRegistry
 
 DEMO = ("tx_id,paid_at,merchant,category,amount,method,note\n"
         "TX-1,2026-08-05 21:00:00,腾讯视频,订阅,25.0,微信,月费\n")
+
+DEMO_LEGACY_TX = ("tx_id,paid_at,merchant,category,amount,method,note\n"
+                  "TX-L,2026-08-05 22:00:00,水电费,居住,60.0,微信,存量账单\n")
 
 
 class ScopedDataTests(unittest.TestCase):
@@ -93,6 +98,35 @@ class ScopedDataTests(unittest.TestCase):
             # 同号交易的另一 owner 行不受影响
             alice_row = next(item for item in alice.query()["items"] if item["tx_id"] == "TX-1")
             self.assertEqual("订阅", alice_row["category"])
+
+    def test_same_tx_audit_rows_do_not_bleed_across_owners(self):
+        # 终审 CRITICAL:同号交易的审计行(tx_audits)自带 owner 戳,必须按
+        # owner 过滤——只看交易归属会把共享 tx_id 的他人审计(operator/note)带出
+        with tempfile.TemporaryDirectory() as temp:
+            service = BillService(Path(temp))
+            alice = service.for_user("alice")
+            bob = service.for_user("bob")
+            alice.import_bills("demo.csv", DEMO)
+            bob.import_bills("demo.csv", DEMO)
+            alice.update_workflow(["TX-1"], "alice", status="待核查", note="alice 的备注")
+            bob.update_workflow(["TX-1"], "bob", status="已忽略", note="bob 的备注")
+            alice_audits = alice.transaction_audits("TX-1")
+            bob_audits = bob.transaction_audits("TX-1")
+            self.assertEqual(1, len(alice_audits))
+            self.assertEqual("alice", alice_audits[0]["operator"])
+            self.assertNotIn("bob", alice_audits[0]["new_value"])
+            self.assertEqual(1, len(bob_audits))
+            self.assertEqual("bob", bob_audits[0]["operator"])
+            self.assertNotIn("alice", bob_audits[0]["new_value"])
+            # admin 视野 = 自身 + 存量 NULL 行:两位用户的审计都不串入
+            admin = service.for_user("admin")
+            self.assertEqual([], admin.transaction_audits("TX-1"))
+            # 存量 NULL 审计行对 admin 仍可见(owner 过滤不改变既有语义)
+            service.import_bills("legacy.csv", DEMO_LEGACY_TX)
+            service.update_workflow(["TX-L"], "root", status="核查中")
+            legacy = admin.transaction_audits("TX-L")
+            self.assertEqual(1, len(legacy))
+            self.assertIsNone(legacy[0]["owner"])
 
     def test_for_user_rejects_empty_owner(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -304,6 +338,71 @@ class OwnerInjectionTests(unittest.TestCase):
         })
         self.assertEqual({"merchant": "盒马鲜生", "owner": "alice"},
                          self.manager.seen_calls[-1])
+
+    def test_update_status_operator_is_server_identity(self):
+        # 终审 Important:operator 与 owner 同为服务端身份——schema 对模型隐藏,
+        # 到达服务器的 operator 一律是登录用户,模型伪造 "ghost" 无效;
+        # 未声明 operator 参数的 bill.* 工具不受影响
+        from billguard.web import inject_owner_identity
+        registry = inject_owner_identity(self._registry(), "alice")
+        parameters = registry.get("bill.update_status").parameters
+        self.assertNotIn("operator", parameters.get("properties", {}))
+        self.assertNotIn("operator", parameters.get("required", []))
+        update = registry.execute("bill.update_status", {
+            "tx_ids": ["TX-1"], "status": "待核查", "operator": "ghost",
+            "owner": "mallory",
+        })
+        self.assertEqual(0, update["count"])  # 存量 NULL 行不在 alice 视野
+        self.assertEqual("alice", self.manager.seen_calls[-1]["operator"])
+        self.assertEqual("alice", self.manager.seen_owners[-1])
+        # aggregate 未声明 operator:注入层不得额外塞 operator 参数
+        registry.execute("bill.aggregate", {"merchant": "盒马鲜生"})
+        self.assertNotIn("operator", self.manager.seen_calls[-1])
+
+
+class _RecordingMCPManager(MCPClientManager):
+    """不启动事件循环的记录型管理器:复用真实 register_tools 的 handler 绑定,
+    只记录每次调用到达的 (server, tool, arguments),用于断言伪造键不改路由。"""
+
+    def __init__(self, server: str, tools: tuple) -> None:
+        self._snapshots = {server: SimpleNamespace(name=server, tools=tools)}
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def call_tool(self, server_name: str, tool_name: str,
+                  arguments: dict | None = None) -> Any:
+        self.calls.append((server_name, tool_name, dict(arguments or {})))
+        return {"ok": (server_name, tool_name)}
+
+
+class McpHandlerRerouteGuardTests(unittest.TestCase):
+    def test_forged_server_tool_keys_do_not_reroute(self):
+        # 终审 CRITICAL:mcp_runtime 动态 handler 若以具名默认参数绑定 _server/_tool,
+        # 模型伪造同名键(work-items.list_issues 携带 _server=bill、_tool=query、
+        # owner=alice)即可重路由到 bill 服务器伪造身份读写——handler 必须是
+        # 闭包捕获 + 仅 **arguments 签名,伪造键无处绑定。
+        from billguard.mcp_runtime import MCPToolInfo
+        from billguard.policy import ToolPolicy
+        policy = ToolPolicy("read", False, "Remote tool is read-only")
+        manager = _RecordingMCPManager("work-items", (
+            MCPToolInfo("list_issues", "List issues",
+                        {"type": "object", "properties": {"owner": {"type": "string"}}},
+                        policy),
+            MCPToolInfo("get_issue", "Get issue",
+                        {"type": "object", "properties": {"issue_id": {"type": "string"}}},
+                        policy),
+        ))
+        registry = ToolRegistry()
+        manager.register_tools(registry, "work-items")
+        self.assertIn("work-items.list_issues", registry.names())
+
+        registry.execute("work-items.list_issues", {
+            "_server": "bill", "_tool": "query", "owner": "alice",
+        })
+        # 调用仍到达原 server/tool;伪造键只是被透传的普通参数,不构成重路由
+        self.assertEqual([("work-items", "list_issues")],
+                         [(server, tool) for server, tool, _ in manager.calls])
+        self.assertEqual({"_server": "bill", "_tool": "query", "owner": "alice"},
+                         manager.calls[0][2])
 
 
 if __name__ == "__main__":
