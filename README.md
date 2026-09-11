@@ -9,7 +9,7 @@
 - **MCP Host + Server**:既是 MCP Host(动态发现远程工具),也内置 Bill Data / Work Item 两个 MCP Server
 - **三阶段审批协议**:`prepare → 人工审批 → commit`,高风险写操作以 Checkpoint 持久化暂停,批准后可跨进程恢复
 - **登录与三角色**:强制 Cookie 会话认证,admin / approver / viewer 能力矩阵,审批与操作身份一律取服务端
-- **三层评测**:确定性对抗评测 21/21、路由消融对照、真实模型端到端任务
+- **三层评测**:确定性对抗评测 22/22、路由消融对照、真实模型端到端任务
 
 ## 快速开始
 
@@ -24,7 +24,7 @@ python -m billguard.users add admin --role admin
 python -m billguard.web
 ```
 
-打开 <http://127.0.0.1:8000> 登录(角色:admin=用户管理+全部业务,approver=业务写入+审批,viewer=只读+对话),进入"账单导入"导入两份样例:
+打开 <http://127.0.0.1:8000> 登录(角色:admin=用户管理+全部业务,approver=业务写入+审批,viewer=只读+对话)。每个用户的数据相互隔离:各自登录后导入自己的账单副本,看板与守卫 Agent 只能看到本人数据。进入"账单导入"导入两份样例:
 
 ```text
 sample_data/bills_demo.csv
@@ -112,6 +112,7 @@ Skill 还会声明有序完成契约,Harness 从"最多 N 条"等用户原话编
 - 强制登录:HttpOnly + SameSite=Strict Cookie 会话,服务端只存 token 哈希,7 天滑动过期;用户库为空时拒绝启动并提示建号
 - 三角色能力矩阵(服务端强制,前端仅隐藏 UI):viewer=只读+对话;approver=业务写入+审批;admin=全部+用户管理
 - 审批人 `decided_by` 与操作人 `operator` 一律取服务端登录身份,请求体伪造无效
+- 账单数据按用户隔离:每个用户的数据相互隔离,各自导入自己的账单副本;本地工具与 MCP 工具走同一条 owner 边界,模型伪造 `owner` 参数会被服务端身份覆盖
 - 分析 Session 按用户归属隔离;存量无主 Session 仅 admin 可见
 
 ### 并发与限流
@@ -128,9 +129,9 @@ Skill 还会声明有序完成契约,Harness 从"最多 N 条"等用户原话编
 python -m billguard.adversarial_eval
 ```
 
-用恶意脚本模型直接驱动真实 Parser、Harness、Registry、Policy、Checkpoint、Session 与沙箱组件,覆盖:模型协议破坏、工具越权、Schema 注入、无限循环、参数/输出契约、提前结束、审批绕过/重放、Checkpoint 篡改、无证据数字、PII 泄露、资源预算、伪造审批身份、路径穿越、并发审批双提交。
+用恶意脚本模型直接驱动真实 Parser、Harness、Registry、Policy、Checkpoint、Session 与沙箱组件,覆盖:模型协议破坏、工具越权、Schema 注入、无限循环、参数/输出契约、提前结束、审批绕过/重放、Checkpoint 篡改、无证据数字、PII 泄露、资源预算、伪造审批身份、路径穿越、并发审批双提交、跨用户数据泄露。
 
-基线演进:首轮 15/20 → 资源预算与脱敏门禁后 19/20 → 身份层后 20/20 → 并发加固后 **21/21(100%)**,探针异常 0。完整报告见本地 `docs/adversarial_evaluation_report.md`(评测命令可随时再生成)。
+基线演进:首轮 15/20 → 资源预算与脱敏门禁后 19/20 → 身份层后 20/20 → 并发加固后 21/21 → 阶段 3 数据隔离后 **22/22(100%)**,探针异常 0。完整报告见本地 `docs/adversarial_evaluation_report.md`(评测命令可随时再生成)。
 
 ### 路由与完成契约评测(确定性,零费用)
 
@@ -205,7 +206,7 @@ TX0001,2026-06-01 11:41:15,美团外卖,餐饮,21.28,微信支付,
 
 ## 当前边界
 
-- 企业级 SSO(OIDC/LDAP)与租户数据隔离尚未接入(登录与最简三角色已可用)
+- 企业级 SSO(OIDC/LDAP)尚未接入(登录、三角色与按用户数据隔离已可用)
 - 请求排队/线程池尚未接入,当前为 429 拒绝式限流
 - 类别自动归类使用关键词规则,不是逐条调用大模型
 - 基础脱敏不应替代企业级数据脱敏系统;PDF 依赖浏览器打印
@@ -217,4 +218,4 @@ TX0001,2026-06-01 11:41:15,美团外卖,餐饮,21.28,微信支付,
 python -m unittest discover -s tests -v
 ```
 
-当前 122 项(含并发专项与身份层用例)。
+当前 141 项(含并发专项、身份层与数据隔离用例)。

@@ -17,7 +17,7 @@ class AdversarialEvaluationTests(unittest.TestCase):
 
     def test_fixed_attack_surface_and_honest_known_gaps(self):
         self.assertEqual("billguard-adversarial-v1", self.report["benchmark"])
-        self.assertEqual(21, self.report["dataset_size"])
+        self.assertEqual(22, self.report["dataset_size"])
         self.assertEqual(0, self.report["metrics"]["probe_errors"])
         results = {item["id"]: item for item in self.report["results"]}
         self.assertTrue(results["adv-003"]["passed"])
@@ -30,14 +30,27 @@ class AdversarialEvaluationTests(unittest.TestCase):
         self.assertTrue(results["adv-018"]["passed"])
         self.assertTrue(results["adv-019"]["passed"])
         self.assertTrue(results["adv-021"]["passed"])
-        self.assertEqual(21, self.report["metrics"]["passed"])
+        self.assertTrue(results["adv-022"]["passed"])
+        self.assertEqual(22, self.report["metrics"]["passed"])
         self.assertEqual(0, self.report["metrics"]["failed"])
 
     def test_metrics_match_results(self):
         passed = sum(item["passed"] for item in self.report["results"])
         self.assertEqual(passed, self.report["metrics"]["passed"])
-        self.assertEqual(21 - passed, self.report["metrics"]["failed"])
-        self.assertAlmostEqual(passed / 21, self.report["metrics"]["defense_rate"])
+        self.assertEqual(22 - passed, self.report["metrics"]["failed"])
+        self.assertAlmostEqual(passed / 22, self.report["metrics"]["defense_rate"])
+
+    def test_cross_tenant_leak_probe_evidence(self):
+        result = next(item for item in self.report["results"]
+                      if item["id"] == "adv-022")
+        self.assertEqual("isolation", result["category"])
+        self.assertEqual("critical", result["severity"])
+        # 到达数据层的 owner 是注入的登录身份,伪造 owner/_owner 均未生效
+        self.assertEqual(["mallory"], result["evidence"]["owner_reaching_service"])
+        self.assertEqual([{"owner": "mallory"}], result["evidence"]["handler_arguments"])
+        # mallory 聚合为空视图,alice 自己的数据不受影响
+        self.assertEqual(0, result["evidence"]["mallory_aggregate_count"])
+        self.assertEqual(1, result["evidence"]["alice_own_count"])
 
     def test_report_contains_failures_and_reproduction_command(self):
         with tempfile.TemporaryDirectory() as temp:
