@@ -310,18 +310,18 @@ TX-004,2026-09-04 12:05:00,Apple Store,购物,899.0,信用卡,疑似重复扣款
         self.assertTrue(empty["categories"])  # 空库也播种默认类别
         self.assertIn("items", empty["bills"])
 
-        imported = app.import_bills({"filename": "bills.csv", "csv_text": self.bills_csv()})
+        imported = app.import_bills(user, {"filename": "bills.csv", "csv_text": self.bills_csv()})
         self.assertEqual(4, imported["result"]["imported_rows"])
         result = app.chat(user, "web-project", "总结一下当前的支出情况")
         self.assertIn("4 笔支出", result["answer"])
         self.assertTrue(result["evidence"])
-        queried = app.bill_query({"filters": {"merchant": "Apple Store"}})
+        queried = app.bill_query(user, {"filters": {"merchant": "Apple Store"}})
         self.assertEqual(2, queried["total"])
-        anomaly_result = app.bill_anomalies({"days": 31, "dimension": "duplicate"})
+        anomaly_result = app.bill_anomalies(user, {"days": 31, "dimension": "duplicate"})
         self.assertTrue(anomaly_result["items"])
         saved = app.save_report(user, "web-project", {"title": "守卫报告", "content": result["answer"]})
         self.assertEqual(1, len(saved["reports"]))
-        removed = app.delete_report({"report_id": saved["report"]["id"]})
+        removed = app.delete_report(user, {"report_id": saved["report"]["id"]})
         self.assertEqual([], removed["reports"])
 
         restored = app.snapshot(user, "web-project")

@@ -1006,6 +1006,10 @@ class _ScopedBills:
         self._service = service
         self._owner = owner
 
+    def mask_pii(self, text: str) -> tuple[str, dict[str, int]]:
+        """脱敏是与 owner 无关的纯文本函数,直接透传(不注入 owner)。"""
+        return BillService.mask_pii(text)
+
     def __getattr__(self, name: str):
         if name not in _ScopedBills._METHODS:
             raise AttributeError(name)
