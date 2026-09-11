@@ -16,7 +16,7 @@ class AdversarialEvaluationTests(unittest.TestCase):
         cls.report = AdversarialEvaluator().run()
 
     def test_fixed_attack_surface_and_honest_known_gaps(self):
-        self.assertEqual("feedback-agent-adversarial-v1", self.report["benchmark"])
+        self.assertEqual("billguard-adversarial-v1", self.report["benchmark"])
         self.assertEqual(21, self.report["dataset_size"])
         self.assertEqual(0, self.report["metrics"]["probe_errors"])
         results = {item["id"]: item for item in self.report["results"]}

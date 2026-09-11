@@ -77,11 +77,11 @@ def build_server(data_dir: str | Path) -> FastMCP:
             "rule": "approve is deliberately not exposed as an MCP tool",
         }, ensure_ascii=False)
 
-    @server.prompt(name="create-feedback-action-item")
-    def create_feedback_action_item(problem: str, evidence_refs: str = "") -> str:
-        """生成从反馈洞察创建行动项的受控任务模板。"""
+    @server.prompt(name="create-bill-action-item")
+    def create_bill_action_item(problem: str, evidence_refs: str = "") -> str:
+        """生成从账单守卫发现创建行动项的受控任务模板。"""
         return (
-            f"为以下客户反馈问题准备行动项：{problem}。"
+            f"为以下账单问题准备行动项：{problem}。"
             f"证据引用：{evidence_refs or '未提供'}。"
             "先调用 prepare_issue 取得完整参数和 approval_id，再用该 ID 提出 commit_issue 调用。"
             "Host 必须在调用到达本服务前暂停并请求人类审批；拿到成功结果前不得声称工单已创建。"

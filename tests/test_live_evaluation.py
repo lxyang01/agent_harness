@@ -254,7 +254,7 @@ class LiveEvaluationTests(unittest.TestCase):
         )
         report = {
             "schema_version": 1, "evaluation_type": "live_llm",
-            "benchmark": "feedback-agent-live-e2e-v1", "evaluated_at": "now",
+            "benchmark": "billguard-live-e2e-v1", "evaluated_at": "now",
             "model": "test-model", "dataset_size": 1, "repeats": 1,
             "metrics": metrics, "results": [result], "scope_note": "test scope",
         }

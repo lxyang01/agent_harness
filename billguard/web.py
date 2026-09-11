@@ -481,9 +481,6 @@ class BillGuardApp:
                          "disabled": updated.disabled}}
 
 
-# 过渡别名(Task 8 统一移除):保留一行让遗漏引用在 Task 8 的 grep 中集中暴露。
-FeedbackWebApp = BillGuardApp
-
 _AUTH_EXEMPT_POST = {"/api/auth/login"}
 _CAPABILITY_BY_PATH = {
     "/api/reports/save": "report_write",

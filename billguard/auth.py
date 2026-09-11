@@ -14,6 +14,8 @@ from typing import Iterator
 
 ROLES = ("admin", "approver", "viewer")
 
+# 能力常量沿用继承层命名(含 feedback_write):这是认证/角色层的内部标识,
+# 服务端与前端 JS 一致引用,从不作为文案展示给用户,按"认证/角色继承不动"约束保留。
 _CAPABILITY_BY_ROLE = {
     "viewer": frozenset(),
     "approver": frozenset({"report_write", "feedback_write", "approval_decide"}),
@@ -64,8 +66,8 @@ def _hash_password(password: str, salt: bytes) -> bytes:
 
 
 # 未知用户名的等代价哈希,用于抹平 verify 的计时差
-_DUMMY_SALT = b"feedback-lens-timing-equalizer"
-_DUMMY_HASH = _hash_password("feedback-lens", _DUMMY_SALT).hex()
+_DUMMY_SALT = b"billguard-timing-equalizer"
+_DUMMY_HASH = _hash_password("billguard-dummy", _DUMMY_SALT).hex()
 
 
 class UserStore:

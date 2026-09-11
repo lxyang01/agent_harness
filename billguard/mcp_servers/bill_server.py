@@ -83,7 +83,7 @@ def build_server(data_dir: str | Path) -> FastMCP:
     def compare_periods(days: int = 7) -> dict[str, Any]:
         """将最近 N 天支出与此前等长周期进行确定性比较。"""
         if days < 1 or days > 365:
-            raise ValueError("days must be between 1 and 365")
+            raise ValueError("days 必须在 1 到 365 之间")
         return service.compare(days)
 
     @server.tool(name="detect_anomalies", annotations=READ_ONLY, structured_output=True)
@@ -92,9 +92,9 @@ def build_server(data_dir: str | Path) -> FastMCP:
                          limit: int = 10) -> dict[str, Any]:
         """识别四类账单异常：类别激增、疑似重复扣费、订阅涨价和大额离群。"""
         if days < 1 or days > 365:
-            raise ValueError("days must be between 1 and 365")
+            raise ValueError("days 必须在 1 到 365 之间")
         if limit < 1 or limit > 50:
-            raise ValueError("limit must be between 1 and 50")
+            raise ValueError("limit 必须在 1 到 50 之间")
         return service.anomalies(days, dimension, limit)
 
     @server.tool(name="get_samples", annotations=READ_ONLY, structured_output=True)
@@ -104,7 +104,7 @@ def build_server(data_dir: str | Path) -> FastMCP:
                     date_to: str | None = None) -> dict[str, Any]:
         """读取最多 20 条已脱敏代表性交易；具体问题优先传 merchant，其次 category，零结果时按 retry_hint 放宽一次查询。"""
         if limit < 1 or limit > 20:
-            raise ValueError("limit must be between 1 and 20")
+            raise ValueError("limit 必须在 1 到 20 之间")
         return service.samples(merchant=merchant, category=category, query=query,
                                limit=limit, date_from=date_from, date_to=date_to)
 
@@ -118,9 +118,9 @@ def build_server(data_dir: str | Path) -> FastMCP:
                       operator: str, note: str = "") -> dict[str, Any]:
         """更新交易核查状态。这是写操作，MCP Host 必须在调用前获得用户批准。"""
         if not tx_ids or len(tx_ids) > 100:
-            raise ValueError("tx_ids must contain between 1 and 100 items")
+            raise ValueError("tx_ids 必须包含 1 到 100 个交易编号")
         if not operator.strip():
-            raise ValueError("operator is required")
+            raise ValueError("operator 不能为空")
         return service.update_workflow(tx_ids, operator.strip(), status=status, note=note)
 
     @server.resource(

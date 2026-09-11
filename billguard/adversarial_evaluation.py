@@ -20,7 +20,7 @@ from .policy import ApprovalStore, PolicyError, PolicyGateway, ToolPolicy
 from .session import SessionStore
 from .skills import SkillRuntime
 from .tools import DocumentService, Tool, ToolError, ToolRegistry, calculator
-from .web import FeedbackWebApp
+from .web import BillGuardApp
 from .work_items import WorkItemStore
 
 
@@ -103,7 +103,7 @@ class AdversarialEvaluator:
     is a confirmed control gap, not a flaky model-quality score.
     """
 
-    BENCHMARK = "feedback-agent-adversarial-v1"
+    BENCHMARK = "billguard-adversarial-v1"
 
     def cases(self) -> list[AdversarialCase]:
         return [
@@ -224,7 +224,7 @@ class AdversarialEvaluator:
     def run(self) -> dict[str, Any]:
         results: list[dict[str, Any]] = []
         started = time.perf_counter()
-        with tempfile.TemporaryDirectory(prefix="feedback-adversarial-") as temp:
+        with tempfile.TemporaryDirectory(prefix="billguard-adversarial-") as temp:
             root = Path(temp)
             for case in self.cases():
                 case_started = time.perf_counter()
@@ -389,6 +389,8 @@ class AdversarialEvaluator:
         )
 
     def _limit_probe(self, root: Path, first_limit: int | None) -> ProbeResult:
+        # 夹具工具名有意沿用 legacy feedback_*:contracts._tool_role 的别名组
+        # 需要覆盖 legacy 命名路径,勿改成 bill_*。
         calls: list[int] = []
         registry = ToolRegistry()
         registry.register(Tool(
@@ -674,7 +676,7 @@ class AdversarialEvaluator:
         ])
         gateway = PolicyGateway(ApprovalStore(root / "web" / "policy"))
         authenticator = Authenticator(users, AuthSessionStore(root / "auth"))
-        app = FeedbackWebApp(root / "web", root / "docs", llm, _AuthFakeManager(work_items),
+        app = BillGuardApp(root / "web", root / "docs", llm, _AuthFakeManager(work_items),
                              gateway, work_items, authenticator)
         alice = User("alice", "approver")
         mallory = User("mallory", "viewer")
@@ -731,7 +733,7 @@ class AdversarialEvaluator:
         ])
         gateway = PolicyGateway(ApprovalStore(root / "web" / "policy"))
         authenticator = Authenticator(users, AuthSessionStore(root / "auth"))
-        app = FeedbackWebApp(root / "web", root / "docs", llm, _AuthFakeManager(work_items),
+        app = BillGuardApp(root / "web", root / "docs", llm, _AuthFakeManager(work_items),
                              gateway, work_items, authenticator)
         alice = User("alice", "approver")
         paused = app.chat(alice, "approval-session", "$monthly-guard-report create issue")
@@ -777,7 +779,7 @@ def save_adversarial_report(report: dict[str, Any], output_dir: str | Path,
     failures = [item for item in report["results"] if not item["passed"]]
     defended = [item for item in report["results"] if item["passed"]]
     lines = [
-        "# Feedback Agent 对抗评测与失败案例报告",
+        "# BillGuard 对抗评测与失败案例报告",
         "",
         "## 1. 执行摘要",
         "",

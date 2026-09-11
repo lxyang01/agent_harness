@@ -17,6 +17,8 @@ PROJECT_SKILLS = Path(__file__).resolve().parents[1] / "skills"
 
 class ContractCompilerTests(unittest.TestCase):
     def test_sample_limit_is_compiled_for_query_and_sample_tools(self):
+        # 工具名有意用 legacy feedback.* 前缀:覆盖 contracts._tool_role 的
+        # legacy 别名组(bill_* 与 bill.* 由其余用例覆盖)。
         contract = compile_request_contract(
             "登录问题的根因可能是什么？检索相关反馈并读取最多8条样本。",
             ["root-cause-analysis"],
