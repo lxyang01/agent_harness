@@ -1,2 +1,2 @@
-"""MCP servers owned by Feedback Agent Runtime."""
+"""MCP servers owned by the BillGuard runtime."""
 

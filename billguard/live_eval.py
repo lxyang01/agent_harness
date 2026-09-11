@@ -40,7 +40,7 @@ def parse_case_selector(selector: str) -> list[str]:
 def main() -> None:
     project_root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(
-        description="Run paid, real-model end-to-end Feedback Agent evaluations",
+        description="Run paid, real-model end-to-end BillGuard evaluations",
     )
     parser.add_argument("--dataset", default=str(project_root / "evals" / "live_agent_cases.jsonl"))
     parser.add_argument("--output-dir", default=str(project_root / ".sessions" / "evaluations"))

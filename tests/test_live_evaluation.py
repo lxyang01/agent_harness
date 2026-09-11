@@ -35,12 +35,17 @@ class LiveEvaluationTests(unittest.TestCase):
     def test_fixed_live_dataset_has_real_workflow_coverage(self):
         cases = load_live_eval_cases(PROJECT_ROOT / "evals" / "live_agent_cases.jsonl")
         self.assertEqual(15, len(cases))
-        self.assertEqual({"triage", "query", "samples", "anomaly", "root_cause", "report", "approval"},
+        self.assertEqual({"triage", "anomaly", "root_cause", "report", "approval"},
                          {case.category for case in cases})
-        self.assertEqual(4, sum(case.expected_status == "approval_pending" for case in cases))
-        self.assertEqual(6, sum(bool(case.evidence_tools) for case in cases))
-        self.assertEqual(3, sum(case.check_causal_claims for case in cases))
-        self.assertEqual(2, sum(bool(case.required_sections) for case in cases))
+        # 审批用例到 prepare/commit 检查点为止;evidence/因果/结构检查覆盖
+        # 下钻、根因区分和月度守卫报告四章节。
+        self.assertEqual(2, sum(case.expected_status == "approval_pending" for case in cases))
+        self.assertEqual(7, sum(bool(case.evidence_tools) for case in cases))
+        self.assertEqual(2, sum(case.check_causal_claims for case in cases))
+        self.assertEqual(1, sum(bool(case.required_sections) for case in cases))
+        self.assertEqual(("支出事实", "异常清单", "根因推测", "行动计划"),
+                         next(case.required_sections for case in cases
+                              if case.required_sections))
 
     def test_trace_scorer_accepts_safe_checkpoint_without_committing(self):
         case = LiveEvalCase(
@@ -72,8 +77,7 @@ class LiveEvaluationTests(unittest.TestCase):
         self.assertFalse(result["approval_violation"])
 
     def test_runner_executes_isolated_skill_mcp_harness_path(self):
-        # live 数据集仍是反馈域(待 T7 迁移);用账单域内联用例验证
-        # Skill 路由 → MCP → Harness 全链路仍然贯通。
+        # 用账单域内联用例验证 Skill 路由 → MCP → Harness 全链路贯通。
         case = LiveEvalCase(
             id="live-bill-triage", category="triage",
             input="给我一个当前账单支出概览，只说明数据事实。",

@@ -75,6 +75,10 @@ class RequestContract:
 _MAX_ROWS = re.compile(r"最多\s*(?:返回|读取|给出)?\s*(\d+)\s*条([^，。；,;]{0,10})")
 _TOP_ITEMS = re.compile(r"(?:返回|给出|列出)?\s*前\s*(\d+)\s*项")
 _REPORT_TERMS = ("周报", "月报", "管理层报告", "生成报告", "汇报")
+# monthly-guard-report 的报告型触发词沿用 legacy 的强报告名词口径（不收录
+# 裸“报告/总结”，避免误伤复合激活下的普通概览问法），仅补充账单域名词
+# “守卫报告”，与路由 triggers 中的守卫报告保持一致。
+_BILL_REPORT_TERMS = ("周报", "月报", "守卫报告", "汇报")
 
 _SECTION_CATALOG = {
     "执行摘要": OutputSection("执行摘要", ("执行摘要", "摘要", "summary", "executive_summary")),
@@ -84,6 +88,17 @@ _SECTION_CATALOG = {
     "行动建议": OutputSection("行动建议", ("行动建议", "下一步建议", "建议的验证动作", "recommendations", "action_items")),
     "数据局限": OutputSection("数据局限", ("数据局限", "局限与风险", "风险和待确认事项", "limitations", "risks")),
 }
+
+# monthly-guard-report 固定四章（与 skills/monthly-guard-report/SKILL.md 一致）。
+_BILL_SECTION_CATALOG = {
+    "支出事实": OutputSection("支出事实", ("支出事实", "支出概览", "data_facts", "facts")),
+    "异常清单": OutputSection("异常清单", ("异常清单", "异常问题", "异常变化", "anomalies")),
+    "根因推测": OutputSection("根因推测", ("根因推测", "根因分析", "原因推测", "root_cause", "hypotheses")),
+    "行动计划": OutputSection("行动计划", ("行动计划", "行动建议", "下一步行动", "action_plan", "action_items", "recommendations")),
+}
+
+_ALL_SECTIONS_CATALOG = {**_SECTION_CATALOG, **_BILL_SECTION_CATALOG}
+_BILL_REPORT_SECTIONS = ("支出事实", "异常清单", "根因推测", "行动计划")
 
 
 def compile_request_contract(user_input: str,
@@ -124,22 +139,27 @@ def compile_request_contract(user_input: str,
         if any(term in user_input for term in ("样本", "案例", "代表性")):
             names.insert(-2, "代表性样本")
         sections = [_SECTION_CATALOG[name] for name in dict.fromkeys(names)]
+    elif ("monthly-guard-report" in skills
+          and any(term in user_input for term in _BILL_REPORT_TERMS)):
+        sections = [_ALL_SECTIONS_CATALOG[name] for name in _BILL_REPORT_SECTIONS]
 
     return RequestContract(tuple(strictest.values()), tuple(sections))
 
 
 def output_sections_missing(answer: str, required_names: Iterable[str]) -> list[str]:
-    sections = tuple(_SECTION_CATALOG[name] for name in required_names)
+    sections = tuple(_ALL_SECTIONS_CATALOG[name] for name in required_names)
     return RequestContract(required_sections=sections).missing_sections(answer)
 
 
 def _tool_role(tool_name: str) -> str:
+    # 别名组:每列覆盖 legacy feedback_*、本地 bill_* 与 MCP bill.* 三套命名;
+    # legacy 名保留供对抗探针夹具(adv-006/007)使用。
     leaf = tool_name.rsplit(".", 1)[-1]
-    if leaf in {"feedback_samples", "get_samples"}:
+    if leaf in {"feedback_samples", "bill_samples", "get_samples"}:
         return "samples"
-    if leaf in {"feedback_search", "query"}:
+    if leaf in {"feedback_search", "bill_search", "query"}:
         return "query"
-    if leaf in {"feedback_anomalies", "detect_anomalies"}:
+    if leaf in {"feedback_anomalies", "bill_anomalies", "detect_anomalies"}:
         return "anomalies"
     return leaf
 

@@ -144,6 +144,59 @@ class ContractCompilerTests(unittest.TestCase):
                 blocked[0].data["missing_sections"],
             )
 
+    def test_monthly_guard_report_contract_blocks_on_production_skills(self):
+        # 生产路径:真实 skills 目录路由 monthly-guard-report,报告章节契约
+        # 按账单域四章(支出事实/异常清单/根因推测/行动计划)拦截缺失章节,
+        # 补齐后 final 才被放行。
+        class GuardReportLLM:
+            def __init__(self):
+                self.outputs = iter([
+                    json.dumps({"thought": "先取数", "tool_call": {
+                        "name": "bill.aggregate", "arguments": {},
+                    }}),
+                    json.dumps({"thought": "draft", "final": (
+                        "### 支出事实\n总支出与结构已核对。\n### 异常清单\n未发现待核查异常。"
+                    )}),
+                    json.dumps({"thought": "complete", "final": (
+                        "### 支出事实\n总支出与结构已核对。\n### 异常清单\n未发现待核查异常。\n"
+                        "### 根因推测\n暂无已确认根因，仅保留待验证假设。\n"
+                        "### 行动计划\n下月复查订阅扣费并核对预期金额。"
+                    )}),
+                ])
+
+            def complete(self, messages, tools):
+                return next(self.outputs)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry = ToolRegistry()
+            registry.register(Tool(
+                "bill.aggregate", "Aggregate bills",
+                {"type": "object",
+                 "properties": {"category": {"type": "string"}},
+                 "required": [], "additionalProperties": False},
+                lambda **kwargs: {"total_amount": 0, "count": 0, "by_category": [],
+                                  "top_merchants": [], "pending": 0},
+            ))
+            agent = HarnessEngine(
+                AgentSpec("guard-report-test", "Use the bill tools.",
+                          ("bill.aggregate",), 5),
+                GuardReportLLM(), registry, SessionStore(root / "sessions"),
+                skills=SkillRuntime(PROJECT_SKILLS),
+            )
+            events = []
+            agent.hooks.append(events.append)
+            response = agent.run("guard-report-session", "生成月度守卫报告")
+            activated = [event.data.get("skill") for event in events
+                         if event.event_type == "skill_activated"]
+            self.assertEqual(["monthly-guard-report"], activated)
+            blocked = [event for event in events if event.event_type == "output_contract_blocked"]
+            self.assertEqual(1, len(blocked))
+            self.assertEqual(["根因推测", "行动计划"],
+                             blocked[0].data["missing_sections"])
+            self.assertEqual("completed", response.status)
+            self.assertIn("行动计划", response.answer)
+
 
 if __name__ == "__main__":
     unittest.main()

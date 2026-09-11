@@ -448,7 +448,7 @@ class LiveEvaluationRunner:
         consecutive_infrastructure_errors = 0
         aborted_reason = ""
         started = time.perf_counter()
-        with tempfile.TemporaryDirectory(prefix="feedback-agent-live-eval-") as temp:
+        with tempfile.TemporaryDirectory(prefix="billguard-live-eval-") as temp:
             root = Path(temp)
             bills_dir = root / "billguard" / "bills"
             work_item_dir = root / "work-items"
@@ -512,7 +512,7 @@ class LiveEvaluationRunner:
         return {
             "schema_version": 3,
             "evaluation_type": "live_llm",
-            "benchmark": "feedback-agent-live-e2e-v3",
+            "benchmark": "billguard-live-e2e-v3",
             "evaluated_at": datetime.now(timezone.utc).isoformat(),
             "model": str(getattr(self.llm, "model", "unknown")),
             "temperature": getattr(self.llm, "temperature", None),
@@ -547,7 +547,7 @@ def save_live_evaluation_report(report: dict[str, Any], output_dir: str | Path) 
     metrics = report["metrics"]
     percent = lambda value: "N/A" if value is None else f"{value:.1%}"
     lines = [
-        "# Feedback Agent Live End-to-End Evaluation", "",
+        "# BillGuard Live End-to-End Evaluation", "",
         f"- Model: `{report['model']}`",
         f"- Temperature: {report.get('temperature')}",
         f"- Cases: {report['dataset_size']} × {report['repeats']} repeats",

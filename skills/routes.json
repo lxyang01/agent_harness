@@ -25,7 +25,8 @@
     },
     {
       "skill": "monthly-guard-report",
-      "triggers": ["月报", "守卫报告", "报告", "总结", "汇报"],
+      "priority": 20,
+      "triggers": ["月报", "守卫报告", "报告", "总结", "汇报", "取消订阅", "退款", "工单", "小结"],
       "allowed_tools": ["bill_overview", "bill_compare", "bill_anomalies", "bill_search", "bill_samples", "work-items.prepare_issue", "work-items.commit_issue", "bill.aggregate", "bill.compare_periods", "bill.detect_anomalies", "bill.query", "bill.get_samples"],
       "completion_rules": [
         {
@@ -33,7 +34,7 @@
           "required_tool_groups": [["bill_overview", "bill.aggregate"]]
         },
         {
-          "triggers": ["取消订阅", "退款", "工单"],
+          "triggers": ["取消订阅", "取消", "退款", "工单"],
           "required_tool_groups": [["work-items.prepare_issue", "work-items.prepare_issue"]]
         }
       ]

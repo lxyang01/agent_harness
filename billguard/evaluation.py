@@ -106,7 +106,7 @@ class RoutingEvaluator:
         return {
             "schema_version": 1,
             "evaluation_type": "routing",
-            "benchmark": "feedback-agent-routing-v1",
+            "benchmark": "billguard-routing-v1",
             "variant": variant,
             "evaluated_at": datetime.now(timezone.utc).isoformat(),
             "metrics": {
@@ -133,7 +133,7 @@ class RoutingEvaluator:
         return {
             "schema_version": 1,
             "evaluation_type": "routing",
-            "benchmark": "feedback-agent-routing-v1-ablation",
+            "benchmark": "billguard-routing-v1-ablation",
             "evaluated_at": datetime.now(timezone.utc).isoformat(),
             "dataset_size": len(cases),
             "variants": [{"variant": report["variant"], "metrics": report["metrics"]}
@@ -163,7 +163,7 @@ def save_evaluation_report(report: dict[str, Any], output_dir: str | Path) -> di
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     variants = report.get("variants", [])
     lines = [
-        "# Feedback Agent Routing Evaluation",
+        "# BillGuard Routing Evaluation",
         "",
         f"- Dataset size: {report.get('dataset_size', 0)}",
         f"- Evaluated at: {report.get('evaluated_at', '')}",
@@ -174,10 +174,11 @@ def save_evaluation_report(report: dict[str, Any], output_dir: str | Path) -> di
     for item in variants:
         metrics = item["metrics"]
         contract = metrics.get("completion_contract_accuracy")
+        contract_text = "N/A" if contract is None else f"{contract:.1%}"
         lines.append(
             f"| {item['variant']} | {metrics['overall_accuracy']:.1%} | "
             f"{metrics['skill_routing_accuracy']:.1%} | "
-            f"{contract:.1%} | {metrics['average_latency_ms']:.4f} ms | "
+            f"{contract_text} | {metrics['average_latency_ms']:.4f} ms | "
             f"{metrics['p95_latency_ms']:.4f} ms |"
         )
     lines.extend(["", f"> {report.get('scope_note', '')}", ""])
