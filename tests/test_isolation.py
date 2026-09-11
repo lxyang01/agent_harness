@@ -165,6 +165,7 @@ class _OwnerProbeManager:
     def __init__(self, service: BillService) -> None:
         self.service = service
         self.seen_owners: list[str | None] = []
+        self.seen_calls: list[dict] = []
 
     def snapshots(self):
         return [SimpleNamespace(name="bill", transport="test", server_name="t",
@@ -198,17 +199,20 @@ class _OwnerProbeManager:
     def _aggregate(self, **kwargs):
         owner = kwargs.get("owner")
         self.seen_owners.append(owner)
+        self.seen_calls.append(dict(kwargs))
         return self.service.overview(owner=owner)
 
     def _update_status(self, **kwargs):
         owner = kwargs.pop("owner", None)
         self.seen_owners.append(owner)
+        self.seen_calls.append(dict(kwargs))
         return self.service.update_workflow(
             kwargs["tx_ids"], kwargs["operator"],
             status=kwargs["status"], owner=owner)
 
     def _list_issues(self, **kwargs):
         self.seen_owners.append(kwargs.get("owner"))
+        self.seen_calls.append(dict(kwargs))
         return {"count": 0}
 
 
@@ -269,6 +273,37 @@ class OwnerInjectionTests(unittest.TestCase):
         result = agent.tools.execute("bill.aggregate", {"owner": "mallory"})
         self.assertEqual(["alice"], self.manager.seen_owners)
         self.assertEqual(1, result["count"])
+
+    def test_named_parameter_collision_cannot_override_identity(self):
+        # 包装函数不得有具名参数:模型显式传 _owner 同名关键字会覆盖默认绑定
+        # (_owner="admin" 即取得 admin 视野:跨 owner 读 + 存量行写)
+        from billguard.web import inject_owner_identity
+        registry = inject_owner_identity(self._registry(), "alice")
+        result = registry.execute("bill.aggregate", {
+            "_owner": "admin", "merchant": "盒马鲜生",
+        })
+        self.assertEqual(["alice"], self.manager.seen_owners)
+        self.assertEqual({"盒马鲜生"},
+                         {item["name"] for item in result["top_merchants"]})
+        # 写路径同理:伪造 _owner 也改不到 alice 视野之外的存量行
+        update = registry.execute("bill.update_status", {
+            "tx_ids": ["TX-1"], "status": "待核查", "operator": "model",
+            "_owner": "admin",
+        })
+        self.assertEqual(0, update["count"])
+        self.assertEqual(["alice", "alice"], self.manager.seen_owners)
+
+    def test_unknown_keys_never_reach_handler(self):
+        # Schema 之外的键(含 mcp_runtime 动态 handler 的 _server/_tool 内部键)
+        # 必须在包装层被丢弃,不得改变身份或路由
+        from billguard.web import inject_owner_identity
+        registry = inject_owner_identity(self._registry(), "alice")
+        registry.execute("bill.aggregate", {
+            "_server": "work-items", "_tool": "commit_issue", "_original": "x",
+            "anything": 1, "merchant": "盒马鲜生", "owner": "mallory",
+        })
+        self.assertEqual({"merchant": "盒马鲜生", "owner": "alice"},
+                         self.manager.seen_calls[-1])
 
 
 if __name__ == "__main__":
