@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from billguard.bills import BillFilters, BillService
+from billguard.tools import ToolError
 
 
 def demo_csv() -> str:
@@ -98,6 +99,32 @@ class WorkflowAndMaskTests(unittest.TestCase):
         masked, counts = BillService(Path(".")).mask_pii("订单号 SO-20260801123 手机 13812345678")
         self.assertNotIn("13812345678", masked)
         self.assertIn("订单号", counts)
+
+
+class CategoryNameLengthTests(unittest.TestCase):
+    """类别名超长(>40 字符)一律拒绝,不再静默截断。"""
+
+    def test_update_transaction_category_rejects_long_name(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service = BillService(Path(temp))
+            service.import_bills("demo.csv", demo_csv())
+            with self.assertRaises(ToolError) as ctx:
+                service.update_transaction_category("TX-001", "超" * 41, "alice")
+            self.assertIn("40", str(ctx.exception))
+            names = [item["name"] for item in service.categories()]
+            self.assertNotIn("超" * 40, names)  # 没有截断入库
+
+    def test_save_category_rejects_long_name(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service = BillService(Path(temp))
+            with self.assertRaises(ToolError) as ctx:
+                service.save_category("名" * 41, ["关键词"], True, operator="alice")
+            self.assertIn("40", str(ctx.exception))
+            self.assertNotIn("名" * 40,
+                             [item["name"] for item in service.categories()])
+            # 40 字符边界仍可保存
+            result = service.save_category("名" * 40, ["关键词"], True, operator="alice")
+            self.assertEqual("名" * 40, result["name"])
 
 
 if __name__ == "__main__":

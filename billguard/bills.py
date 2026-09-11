@@ -711,10 +711,12 @@ class BillService:
     def save_category(self, name: str, keywords: list[str], enabled: bool = True,
                       category_id: int | None = None, operator: str = "web-user",
                       owner: str | None = None) -> dict[str, Any]:
-        name = name.strip()[:40]
+        name = name.strip()
         cleaned = list(dict.fromkeys(word.strip() for word in keywords if str(word).strip()))
         if not name:
             raise ToolError("类别名称不能为空")
+        if len(name) > 40:
+            raise ToolError("类别名不能超过 40 字符")
         now = _now()
         with self._connect() as db:
             owner_and, owner_params = self._owner_and(owner)
@@ -868,9 +870,11 @@ class BillService:
                                     owner: str | None = None) -> dict[str, Any]:
         """人工改判单笔交易的类别;类别不存在则即时创建,并写入审计。"""
         tx_id = str(tx_id).strip()
-        category = str(category).strip()[:40]
+        category = str(category).strip()
         if not tx_id or not category:
             raise ToolError("tx_id 和 category 不能为空")
+        if len(category) > 40:
+            raise ToolError("类别名不能超过 40 字符")
         now = _now()
         with self._connect() as db:
             # 别名片段只用于带 t 别名的 SELECT;UPDATE 语句无别名,须用裸 owner 片段

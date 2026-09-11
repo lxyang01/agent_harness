@@ -39,15 +39,16 @@ class CapabilityMatrixTests(unittest.TestCase):
     def test_matrix(self):
         self.assertFalse(can("viewer", "approval_decide"))
         self.assertFalse(can("viewer", "report_write"))
-        self.assertFalse(can("viewer", "feedback_write"))
+        self.assertFalse(can("viewer", "bills_write"))
         self.assertFalse(can("viewer", "users_manage"))
         self.assertTrue(can("approver", "report_write"))
-        self.assertTrue(can("approver", "feedback_write"))
+        self.assertTrue(can("approver", "bills_write"))
         self.assertTrue(can("approver", "approval_decide"))
         self.assertFalse(can("approver", "users_manage"))
-        for capability in ("report_write", "feedback_write", "approval_decide", "users_manage"):
+        for capability in ("report_write", "bills_write", "approval_decide", "users_manage"):
             self.assertTrue(can("admin", capability))
         self.assertFalse(can("unknown-role", "report_write"))
+        self.assertFalse(can("admin", "bills_write_legacy"))  # 未定义能力一律拒绝
 
 
 class UserStoreTests(unittest.TestCase):

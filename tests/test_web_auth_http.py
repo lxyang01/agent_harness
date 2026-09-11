@@ -21,6 +21,7 @@ class HttpAuthTests(unittest.TestCase):
         root = Path(self._temp.name)
         users = UserStore(root / "auth")
         users.create("admin", "admin-pass-1234", "admin")
+        users.create("approver1", "approver-pass-1", "approver")
         users.create("viewer1", "viewer-pass-12", "viewer")
         self.app = BillGuardApp(
             root / "web", root / "docs", BillMockLLM(),
@@ -81,6 +82,8 @@ class HttpAuthTests(unittest.TestCase):
             ("/api/bills/import", {"filename": "f.csv", "csv_text": "x"}),
             ("/api/bills/categories", {"tx_id": "TX-1", "category": "餐饮"}),
             ("/api/bills/workflow", {"tx_ids": ["TX-1"], "updates": {"status": "待核查"}}),
+            # 导出含未脱敏 note,按写级(bills_write)保护,viewer 拒绝
+            ("/api/bills/export", {"filters": {}}),
             ("/api/approvals/decide", {"approval_id": "POL-X", "decision": "approve"}),
             ("/api/admin/users", {"username": "u", "password": "12345678", "role": "viewer"}),
         ):
@@ -91,6 +94,22 @@ class HttpAuthTests(unittest.TestCase):
         self.assertEqual(403, status)
         status, _ = self.post("/api/chat", {"message": "最近 7 天的问题"})
         self.assertEqual(200, status)  # viewer 可以对话
+
+    def test_export_bills_allowed_for_writer_roles(self):
+        self.post("/api/auth/login", {"username": "approver1", "password": "approver-pass-1"})
+        status, data = self.post("/api/bills/export", {"filters": {}})
+        self.assertEqual(200, status)
+        self.assertEqual("bills-export.csv", data["filename"])
+        self.post("/api/auth/logout", {})
+        self.post("/api/auth/login", {"username": "admin", "password": "admin-pass-1234"})
+        status, data = self.post("/api/bills/export", {"filters": {}})
+        self.assertEqual(200, status)
+
+    def test_unknown_api_returns_chinese_404_envelope(self):
+        self.post("/api/auth/login", {"username": "admin", "password": "admin-pass-1234"})
+        status, data = self.post("/api/no-such-endpoint", {})
+        self.assertEqual(404, status)
+        self.assertEqual("接口不存在", data["error"])
 
     def test_logout_invalidates_session(self):
         self.post("/api/auth/login", {"username": "admin", "password": "admin-pass-1234"})

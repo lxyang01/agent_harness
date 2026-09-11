@@ -14,12 +14,12 @@ from typing import Iterator
 
 ROLES = ("admin", "approver", "viewer")
 
-# 能力常量沿用继承层命名(含 feedback_write):这是认证/角色层的内部标识,
-# 服务端与前端 JS 一致引用,从不作为文案展示给用户,按"认证/角色继承不动"约束保留。
+# 能力常量(账单类写操作统一为 bills_write):
+# 这是认证/角色层的内部标识,服务端与前端 JS 一致引用,从不作为文案展示给用户。
 _CAPABILITY_BY_ROLE = {
     "viewer": frozenset(),
-    "approver": frozenset({"report_write", "feedback_write", "approval_decide"}),
-    "admin": frozenset({"report_write", "feedback_write", "approval_decide", "users_manage"}),
+    "approver": frozenset({"report_write", "bills_write", "approval_decide"}),
+    "admin": frozenset({"report_write", "bills_write", "approval_decide", "users_manage"}),
 }
 
 _USERNAME = re.compile(r"^[a-z0-9][a-z0-9_-]{1,31}$")
