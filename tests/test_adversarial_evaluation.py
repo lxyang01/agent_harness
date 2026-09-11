@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from minimal_agent.adversarial_evaluation import (
+from billguard.adversarial_evaluation import (
     AdversarialEvaluator,
     save_adversarial_report,
 )
@@ -16,7 +16,7 @@ class AdversarialEvaluationTests(unittest.TestCase):
         cls.report = AdversarialEvaluator().run()
 
     def test_fixed_attack_surface_and_honest_known_gaps(self):
-        self.assertEqual("feedback-agent-adversarial-v1", self.report["benchmark"])
+        self.assertEqual("billguard-adversarial-v1", self.report["benchmark"])
         self.assertEqual(21, self.report["dataset_size"])
         self.assertEqual(0, self.report["metrics"]["probe_errors"])
         results = {item["id"]: item for item in self.report["results"]}
@@ -48,7 +48,7 @@ class AdversarialEvaluationTests(unittest.TestCase):
             markdown = Path(paths["canonical_markdown"]).read_text(encoding="utf-8")
             self.assertIn("对抗评测与失败案例报告", markdown)
             self.assertIn("adv-015", markdown)
-            self.assertIn("python -m minimal_agent.adversarial_eval", markdown)
+            self.assertIn("python -m billguard.adversarial_eval", markdown)
             self.assertTrue(Path(paths["json"]).is_file())
 
 

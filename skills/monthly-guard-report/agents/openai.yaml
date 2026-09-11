@@ -1,0 +1,4 @@
+interface:
+  display_name: "Monthly Guard Report"
+  short_description: "Create evidence-backed monthly guard reports"
+  default_prompt: "Use $monthly-guard-report to turn this month's spending analysis into a guard report."

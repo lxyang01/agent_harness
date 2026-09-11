@@ -9,9 +9,9 @@ import urllib.request
 from http.cookiejar import CookieJar
 from pathlib import Path
 
-from minimal_agent.agents import FeedbackMockLLM
-from minimal_agent.auth import AuthSessionStore, Authenticator, UserStore
-from minimal_agent.web import BusyError, FeedbackWebApp, make_handler
+from billguard.agents import BillMockLLM
+from billguard.auth import AuthSessionStore, Authenticator, UserStore
+from billguard.web import BusyError, BillGuardApp, make_handler
 from http.server import ThreadingHTTPServer
 
 
@@ -22,8 +22,8 @@ class HttpAuthTests(unittest.TestCase):
         users = UserStore(root / "auth")
         users.create("admin", "admin-pass-1234", "admin")
         users.create("viewer1", "viewer-pass-12", "viewer")
-        self.app = FeedbackWebApp(
-            root / "web", root / "docs", FeedbackMockLLM(),
+        self.app = BillGuardApp(
+            root / "web", root / "docs", BillMockLLM(),
             authenticator=Authenticator(users, AuthSessionStore(root / "auth")))
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.app))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -78,7 +78,9 @@ class HttpAuthTests(unittest.TestCase):
         self.post("/api/auth/login", {"username": "viewer1", "password": "viewer-pass-12"})
         for path, body in (
             ("/api/reports/save", {"title": "t", "content": "c"}),
-            ("/api/feedback/import", {"filename": "f.csv", "csv_text": "x"}),
+            ("/api/bills/import", {"filename": "f.csv", "csv_text": "x"}),
+            ("/api/bills/categories", {"tx_id": "TX-1", "category": "餐饮"}),
+            ("/api/bills/workflow", {"tx_ids": ["TX-1"], "updates": {"status": "待核查"}}),
             ("/api/approvals/decide", {"approval_id": "POL-X", "decision": "approve"}),
             ("/api/admin/users", {"username": "u", "password": "12345678", "role": "viewer"}),
         ):

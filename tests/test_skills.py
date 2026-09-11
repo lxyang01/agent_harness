@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from minimal_agent.agents import create_feedback_agent
-from minimal_agent.feedback import FeedbackService
-from minimal_agent.skills import SkillError, SkillRuntime
+from billguard.agents import create_bill_agent
+from billguard.bills import BillService
+from billguard.skills import SkillError, SkillRuntime
 
 
 PROJECT_SKILLS = Path(__file__).resolve().parents[1] / "skills"
@@ -29,15 +29,15 @@ class SkillRuntimeTests(unittest.TestCase):
         runtime = SkillRuntime(PROJECT_SKILLS)
         names = {skill.name for skill in runtime.catalog()}
         self.assertEqual({
-            "feedback-triage",
+            "bill-triage",
             "anomaly-investigation",
             "root-cause-analysis",
-            "executive-report",
+            "monthly-guard-report",
         }, names)
 
     def test_implicit_routing_can_activate_multiple_relevant_skills(self):
         runtime = SkillRuntime(PROJECT_SKILLS)
-        activations = runtime.activate("分析支付问题异常增长的原因")
+        activations = runtime.activate("分析订阅涨价异常的原因")
         names = {activation.name for activation in activations}
         self.assertEqual({"anomaly-investigation", "root-cause-analysis"}, names)
         self.assertTrue(all(activation.version for activation in activations))
@@ -45,58 +45,63 @@ class SkillRuntimeTests(unittest.TestCase):
 
     def test_compound_anomaly_and_work_item_intent_activates_completion_contract(self):
         runtime = SkillRuntime(PROJECT_SKILLS)
-        activations = runtime.activate("分析最近异常增长的问题，并创建一个高优先级跟进工单")
+        activations = runtime.activate(
+            "分析最近的重复扣费异常并生成守卫报告，创建取消订阅工单",
+        )
         self.assertEqual(
-            {"anomaly-investigation", "executive-report"},
+            {"anomaly-investigation", "monthly-guard-report"},
             {activation.name for activation in activations},
         )
-        executive = next(item for item in activations if item.name == "executive-report")
+        report = next(item for item in activations if item.name == "monthly-guard-report")
         self.assertEqual(
-            ("work-items.prepare_issue", "work-items.commit_issue"),
-            executive.required_tools,
+            (
+                ("bill_overview", "bill.aggregate"),
+                ("work-items.prepare_issue",),
+            ),
+            report.required_tool_groups,
+        )
+        self.assertEqual(
+            (("work-items.prepare_issue",),),
+            report.required_tool_plan[-1:],
         )
 
     def test_completion_contract_declares_alias_groups_and_report_priority(self):
         runtime = SkillRuntime(PROJECT_SKILLS)
-        root = next(item for item in runtime.activate(
-            "支付失败为什么增多，请读取样本",
-        ) if item.name == "root-cause-analysis")
+        anomaly = next(item for item in runtime.activate(
+            "排查重复扣费，读取样本",
+        ) if item.name == "anomaly-investigation")
         self.assertIn(
-            ("feedback_samples", "feedback.get_samples"),
-            root.required_tool_groups,
+            ("bill_samples", "bill.get_samples"),
+            anomaly.required_tool_groups,
         )
         self.assertEqual(
-            (
-                ("feedback_search", "feedback.query"),
-                ("feedback_samples", "feedback.get_samples"),
-            ),
-            root.required_tool_plan,
+            (("bill_samples", "bill.get_samples"),),
+            anomaly.required_tool_plan,
         )
-        report = runtime.activate("生成最近7天客户反馈周报，包含异常和样本")
-        self.assertEqual("executive-report", report[0].name)
+        report = runtime.activate("生成本月守卫报告")
+        self.assertEqual("monthly-guard-report", report[0].name)
         self.assertEqual(
-            {"executive-report", "anomaly-investigation"},
-            {item.name for item in report},
+            (("bill_overview", "bill.aggregate"),),
+            report[0].required_tool_groups,
         )
-        self.assertEqual(3, len(report[0].required_tool_groups))
 
     def test_explicit_routing_has_priority_and_unknown_skill_is_rejected(self):
         runtime = SkillRuntime(PROJECT_SKILLS, max_active=1)
-        activation = runtime.activate("请使用 $executive-report 分析异常")[0]
-        self.assertEqual("executive-report", activation.name)
-        self.assertEqual("explicit:$executive-report", activation.reason)
+        activation = runtime.activate("请使用 $monthly-guard-report 分析异常")[0]
+        self.assertEqual("monthly-guard-report", activation.name)
+        self.assertEqual("explicit:$monthly-guard-report", activation.reason)
         with self.assertRaises(SkillError):
             runtime.activate("请使用 $not-installed-skill")
 
     def test_default_route_and_tool_policy(self):
         runtime = SkillRuntime(PROJECT_SKILLS)
         activations = runtime.activate("你好，请帮我看看")
-        self.assertEqual(["feedback-triage"], [item.name for item in activations])
+        self.assertEqual(["bill-triage"], [item.name for item in activations])
         tools = runtime.allowed_tools(activations, (
-            "feedback_overview", "feedback_compare", "feedback_anomalies",
-            "feedback_search", "feedback_samples",
+            "bill_overview", "bill_compare", "bill_anomalies",
+            "bill_search", "bill_samples",
         ))
-        self.assertEqual(("feedback_overview", "feedback_search", "feedback_samples"), tools)
+        self.assertEqual(("bill_overview", "bill_search", "bill_samples"), tools)
 
     def test_skill_body_is_loaded_on_activation_not_cached_at_discovery(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -124,21 +129,21 @@ class SkillRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             llm = CaptureLLM()
-            agent = create_feedback_agent(
+            agent = create_bill_agent(
                 llm, "skill-session", root / "sessions",
-                FeedbackService(root / "feedback"), skill_dir=PROJECT_SKILLS,
+                BillService(root / "billguard"), skill_dir=PROJECT_SKILLS,
             )
             events = []
             agent.hooks.append(events.append)
-            response = agent.run("skill-session", "调查最近7天异常增长")
+            response = agent.run("skill-session", "调查最近7天订阅涨价异常")
 
             self.assertEqual(("anomaly-investigation",), response.active_skills)
             exposed = {item["name"] for item in llm.tools}
             self.assertEqual({
-                "feedback_compare", "feedback_anomalies", "feedback_search", "feedback_samples",
+                "bill_compare", "bill_anomalies", "bill_search", "bill_samples",
             }, exposed)
             system_text = "\n".join(item["content"] for item in llm.messages if item["role"] == "system")
-            self.assertIn("客户反馈异常调查", system_text)
+            self.assertIn("账单异常调查", system_text)
             activation_events = [event for event in events if event.event_type == "skill_activated"]
             self.assertEqual("anomaly-investigation", activation_events[0].data["skill"])
             self.assertTrue(activation_events[0].data["version"])
@@ -148,17 +153,10 @@ class SkillRuntimeTests(unittest.TestCase):
             def __init__(self):
                 self.outputs = iter([
                     json.dumps({"thought": "too early", "final": "稍后读取样本"}),
-                    json.dumps({"thought": "wrong order", "tool_call": {
-                        "name": "feedback_samples", "arguments": {"query": "支付失败", "limit": 5},
+                    json.dumps({"thought": "read samples", "tool_call": {
+                        "name": "bill_samples", "arguments": {"query": "视频会员", "limit": 5},
                     }}),
-                    json.dumps({"thought": "search evidence", "tool_call": {
-                        "name": "feedback_search", "arguments": {"query": "支付失败", "limit": 10},
-                    }}),
-                    json.dumps({"thought": "still incomplete", "final": "已经检索和读取"}),
-                    json.dumps({"thought": "complete ordered contract", "tool_call": {
-                        "name": "feedback_samples", "arguments": {"query": "支付失败", "limit": 5},
-                    }}),
-                    json.dumps({"thought": "done", "final": "没有匹配样本"}),
+                    json.dumps({"thought": "done", "final": "已读取脱敏样本，未发现重复扣费。"}),
                 ])
 
             def complete(self, messages, tools):
@@ -166,21 +164,20 @@ class SkillRuntimeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            agent = create_feedback_agent(
+            agent = create_bill_agent(
                 ContractLLM(), "contract-session", root / "sessions",
-                FeedbackService(root / "feedback"), skill_dir=PROJECT_SKILLS,
+                BillService(root / "billguard"), skill_dir=PROJECT_SKILLS,
             )
             events = []
             agent.hooks.append(events.append)
-            response = agent.run("contract-session", "支付失败为什么增多？读取5条样本")
+            response = agent.run("contract-session", "订阅为什么涨价？读取5条样本")
             self.assertEqual("completed", response.status)
             blocked = [event for event in events if event.event_type == "completion_blocked"]
             self.assertEqual(
-                ["feedback_search", "feedback_samples"],
+                ["bill_samples"],
                 blocked[0].data["missing_tools"],
             )
-            self.assertEqual(["feedback_samples"], blocked[1].data["missing_tools"])
-            self.assertEqual(["feedback_samples", "feedback_search", "feedback_samples"], [
+            self.assertEqual(["bill_samples"], [
                 event.data.get("tool") for event in events if event.event_type == "tool_end"
             ])
 

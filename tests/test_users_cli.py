@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from minimal_agent.auth import AuthError, UserStore
-from minimal_agent.users import main
+from billguard.auth import AuthError, UserStore
+from billguard.users import main
 
 
 class UsersCliTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class UsersCliTests(unittest.TestCase):
             root = Path(temp)
             self.assertEqual(0, self.run_cli(root, "add", "root", "--role", "admin", "--password-stdin",
                                              stdin="root-pass-1234\nroot-pass-1234\n"))
-            store = UserStore(root / "auth")
+            store = UserStore(root / "billguard" / "auth")
             self.assertEqual(1, store.count())
             self.assertEqual(0, self.run_cli(root, "add", "bob", "--role", "viewer", "--password-stdin",
                                              stdin="bob-pass-1234\n"))
@@ -29,7 +29,7 @@ class UsersCliTests(unittest.TestCase):
             self.assertEqual("approver", store.get("bob").role)
             self.assertEqual(0, self.run_cli(root, "reset-password", "bob", "--password-stdin",
                                              stdin="new-pass-12345\n"))
-            self.assertEqual("viewer", UserStore(root / "auth").set_role("bob", "viewer").role)
+            self.assertEqual("viewer", UserStore(root / "billguard" / "auth").set_role("bob", "viewer").role)
             self.assertEqual(0, self.run_cli(root, "disable", "bob"))
             self.assertTrue(store.get("bob").disabled)
             self.assertEqual(0, self.run_cli(root, "enable", "bob"))
@@ -40,7 +40,7 @@ class UsersCliTests(unittest.TestCase):
             root = Path(temp)
             self.assertEqual(1, self.run_cli(root, "add", "bob", "--role", "viewer", "--password-stdin",
                                              stdin="short\nshort\n"))
-            self.assertEqual(0, UserStore(root / "auth").count())
+            self.assertEqual(0, UserStore(root / "billguard" / "auth").count())
 
     def test_last_admin_guard(self):
         with tempfile.TemporaryDirectory() as temp:

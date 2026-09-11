@@ -9,12 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
-from minimal_agent.auth import User
-from minimal_agent.policy import ApprovalStore, PolicyError, PolicyGateway, ToolPolicy
-from minimal_agent.session import SessionStore
-from minimal_agent.tools import Tool, ToolRegistry
-from minimal_agent.web import BusyError, FeedbackWebApp
-from minimal_agent.work_items import WorkItemError, WorkItemStore
+from billguard.auth import User
+from billguard.policy import ApprovalStore, PolicyError, PolicyGateway, ToolPolicy
+from billguard.session import SessionStore
+from billguard.tools import Tool, ToolRegistry
+from billguard.web import BusyError, BillGuardApp
+from billguard.work_items import WorkItemError, WorkItemStore
 
 
 def run_threaded(count: int, target: Callable[[], Any]) -> tuple[list[Any], list[Exception]]:
@@ -101,10 +101,10 @@ class _CommitManager:
              "required": ["approval_id"], "additionalProperties": False},
             store.commit_issue,
             policy=ToolPolicy("high_write", True, "Creates durable work item")))
-        # 默认 skill(feedback-triage)只信任反馈读工具;注册一个同名只读工具,
+        # 默认 skill(bill-triage)只信任账单读工具;注册一个同名只读工具,
         # 让普通消息的 skill 白名单与注册表有交集,模型调用才能发生。
         registry.register(Tool(
-            "feedback_overview", "Overview placeholder",
+            "bill_overview", "Overview placeholder",
             {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
             lambda: {}))
         return registry.names()
@@ -126,12 +126,12 @@ class SessionLockRaceTests(unittest.TestCase):
             manager.register_tools = lambda registry, name: original_register(
                 registry, name, store=manager_store)
 
-            app = FeedbackWebApp(root / "web", root / "docs", llm, manager,
-                                 gateway, work_items)
+            app = BillGuardApp(root / "web", root / "docs", llm, manager,
+                               gateway, work_items)
             alice = User("alice", "approver")
 
             # 准备:第一次 chat 触发 high_write 暂停,产生 pending 审批
-            paused = app.chat(alice, "s", "$executive-report create issue")
+            paused = app.chat(alice, "s", "$monthly-guard-report create issue")
             self.assertEqual("approval_pending", paused["status"])
 
             # 并发:慢速 chat 与审批恢复同时在同一 session 上运行
@@ -154,7 +154,7 @@ class SessionLockRaceTests(unittest.TestCase):
             self.assertIsNone(chat_result.get("error"))
             self.assertEqual("completed", chat_result["response"]["status"])
             self.assertEqual("completed", decision["status"])
-            session = SessionStore(root / "web" / "feedback_sessions").load("s")
+            session = SessionStore(root / "web" / "billguard" / "sessions").load("s")
             contents = [message.content for message in session.messages]
             self.assertTrue(any("慢速回答" in content for content in contents),
                             f"chat 结果丢失: {contents}")
@@ -173,13 +173,30 @@ class _BlockingLLM:
         return json.dumps({"thought": "done", "final": "ok"}, ensure_ascii=False)
 
 
+class _BillReadManager:
+    """只注册一个 bill.* 只读工具,让默认 skill(bill-triage)的白名单与
+    fake 注册表相交,本地演示链路的模型调用才能发生。"""
+
+    def snapshots(self):
+        return [SimpleNamespace(name="bill", transport="test", server_name="t",
+                                server_version="t", protocol_version="t",
+                                tools=(), resources=(), prompts=())]
+
+    def register_tools(self, registry: ToolRegistry, server_name: str):
+        registry.register(Tool(
+            "bill.aggregate", "Aggregate bills",
+            {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            lambda: {"count": 0, "total_amount": 0}))
+        return registry.names()
+
+
 class LlmSemaphoreTests(unittest.TestCase):
     def test_over_limit_chat_gets_busy_error(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             llm = _BlockingLLM()
-            app = FeedbackWebApp(root / "web", root / "docs", llm,
-                                 max_concurrent_llm=1)
+            app = BillGuardApp(root / "web", root / "docs", llm, _BillReadManager(),
+                               max_concurrent_llm=1)
             alice = User("alice", "approver")
             result: dict[str, Any] = {}
 
@@ -206,7 +223,7 @@ if __name__ == "__main__":
 
 class TaskFileAtomicityTests(unittest.TestCase):
     def test_concurrent_task_writes_never_expose_partial_file(self):
-        from minimal_agent.tools import TaskService
+        from billguard.tools import TaskService
         with tempfile.TemporaryDirectory() as temp:
             tasks = TaskService(Path(temp))
             stop = threading.Event()

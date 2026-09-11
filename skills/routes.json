@@ -1,54 +1,41 @@
 {
-  "default_skill": "feedback-triage",
+  "default_skill": "bill-triage",
   "routes": [
     {
-      "skill": "feedback-triage",
-      "triggers": ["客户反馈", "主要问题", "高频问题", "概览", "分流", "分类", "总结反馈"],
-      "allowed_tools": ["feedback_overview", "feedback_search", "feedback_samples", "feedback.aggregate", "feedback.query", "feedback.get_samples"]
+      "skill": "bill-triage",
+      "triggers": ["账单", "花了多少", "支出", "概览", "消费", "分类", "钱花哪儿"],
+      "allowed_tools": ["bill_overview", "bill_search", "bill_samples", "bill.aggregate", "bill.query", "bill.get_samples"]
     },
     {
       "skill": "anomaly-investigation",
       "priority": 10,
-      "triggers": ["异常", "激增", "突发", "增长", "下降", "变化", "对比", "趋势"],
-      "allowed_tools": ["feedback_compare", "feedback_anomalies", "feedback_search", "feedback_samples", "feedback.compare_periods", "feedback.detect_anomalies", "feedback.query", "feedback.get_samples"],
+      "triggers": ["异常", "涨价", "重复扣费", "盗刷", "激增", "多扣", "可疑", "对比", "环比", "变化"],
+      "allowed_tools": ["bill_compare", "bill_anomalies", "bill_search", "bill_samples", "bill.compare_periods", "bill.detect_anomalies", "bill.query", "bill.get_samples"],
       "completion_rules": [
         {
-          "triggers": ["样本", "典型"],
-          "required_tool_groups": [["feedback_samples", "feedback.get_samples"]]
+          "triggers": ["样本", "明细", "哪几笔"],
+          "required_tool_groups": [["bill_samples", "bill.get_samples"]]
         }
       ]
     },
     {
       "skill": "root-cause-analysis",
-      "triggers": ["根因", "原因", "为什么", "为何", "导致", "造成", "原因推测"],
-      "allowed_tools": ["feedback_overview", "feedback_compare", "feedback_anomalies", "feedback_search", "feedback_samples", "feedback.aggregate", "feedback.compare_periods", "feedback.detect_anomalies", "feedback.query", "feedback.get_samples"],
-      "completion_rules": [
-        {
-          "triggers": ["根因", "原因", "为什么", "为何", "导致", "造成", "原因推测"],
-          "required_tool_groups": [
-            ["feedback_search", "feedback.query"],
-            ["feedback_samples", "feedback.get_samples"]
-          ]
-        }
-      ]
+      "triggers": ["根因", "原因", "为什么", "为何", "导致", "造成", "怎么回事"],
+      "allowed_tools": ["bill_overview", "bill_compare", "bill_anomalies", "bill_search", "bill_samples", "bill.aggregate", "bill.compare_periods", "bill.detect_anomalies", "bill.query", "bill.get_samples"]
     },
     {
-      "skill": "executive-report",
+      "skill": "monthly-guard-report",
       "priority": 20,
-      "triggers": ["管理层报告", "汇报", "周报", "月报", "生成报告", "执行摘要", "行动建议", "行动项", "工单", "跟进工单", "创建工单", "提交工单", "审批工单"],
-      "allowed_tools": ["feedback_overview", "feedback_compare", "feedback_anomalies", "feedback_samples", "feedback.aggregate", "feedback.compare_periods", "feedback.detect_anomalies", "feedback.get_samples", "work-items.list_issues", "work-items.get_issue", "work-items.prepare_issue", "work-items.commit_issue"],
+      "triggers": ["月报", "守卫报告", "报告", "总结", "汇报", "取消订阅", "退款", "工单", "小结"],
+      "allowed_tools": ["bill_overview", "bill_compare", "bill_anomalies", "bill_search", "bill_samples", "work-items.prepare_issue", "work-items.commit_issue", "bill.aggregate", "bill.compare_periods", "bill.detect_anomalies", "bill.query", "bill.get_samples"],
       "completion_rules": [
         {
-          "triggers": ["周报", "月报"],
-          "required_tool_groups": [
-            ["feedback_compare", "feedback.compare_periods"],
-            ["feedback_anomalies", "feedback.detect_anomalies"],
-            ["feedback_samples", "feedback.get_samples"]
-          ]
+          "triggers": ["报告", "月报"],
+          "required_tool_groups": [["bill_overview", "bill.aggregate"]]
         },
         {
-          "triggers": ["工单", "跟进工单", "创建工单", "提交工单"],
-          "required_tools": ["work-items.prepare_issue", "work-items.commit_issue"]
+          "triggers": ["取消订阅", "取消", "退款", "工单"],
+          "required_tool_groups": [["work-items.prepare_issue", "work-items.prepare_issue"]]
         }
       ]
     }

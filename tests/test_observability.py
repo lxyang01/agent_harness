@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from minimal_agent.observability import TraceStore
-from minimal_agent.session import SessionStore
+from billguard.observability import TraceStore
+from billguard.session import SessionStore
 
 
 class TraceStoreTests(unittest.TestCase):
@@ -20,8 +20,8 @@ class TraceStoreTests(unittest.TestCase):
                 {"timestamp": "2026-08-05T00:00:00+00:00", "event": "run_start", "trace_id": "trace-a", "step": 0},
                 {"timestamp": "2026-08-05T00:00:00.010000+00:00", "event": "skill_activated", "trace_id": "trace-a", "step": 0, "skill": "anomaly-investigation"},
                 {"timestamp": "2026-08-05T00:00:00.110000+00:00", "event": "model_output", "trace_id": "trace-a", "step": 1, "latency_ms": 100, "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50, "cost": 0.001}},
-                {"timestamp": "2026-08-05T00:00:00.120000+00:00", "event": "tool_start", "trace_id": "trace-a", "step": 1, "tool": "feedback.compare_periods"},
-                {"timestamp": "2026-08-05T00:00:00.145000+00:00", "event": "tool_end", "trace_id": "trace-a", "step": 1, "tool": "feedback.compare_periods", "latency_ms": 25},
+                {"timestamp": "2026-08-05T00:00:00.120000+00:00", "event": "tool_start", "trace_id": "trace-a", "step": 1, "tool": "bill.compare_periods"},
+                {"timestamp": "2026-08-05T00:00:00.145000+00:00", "event": "tool_end", "trace_id": "trace-a", "step": 1, "tool": "bill.compare_periods", "latency_ms": 25},
                 {"timestamp": "2026-08-05T00:00:00.200000+00:00", "event": "approval_pending", "trace_id": "trace-a", "step": 2},
                 {"timestamp": "2026-08-05T00:01:00+00:00", "event": "run_resume", "trace_id": "trace-a", "step": 2},
                 {"timestamp": "2026-08-05T00:01:00.100000+00:00", "event": "run_end", "trace_id": "trace-a", "step": 3, "status": "completed"},
@@ -35,7 +35,7 @@ class TraceStoreTests(unittest.TestCase):
             self.assertEqual("completed", run["status"])
             self.assertTrue(run["resumed"])
             self.assertEqual(["anomaly-investigation"], run["skills"])
-            self.assertEqual(["feedback.compare_periods"], run["tools"])
+            self.assertEqual(["bill.compare_periods"], run["tools"])
             self.assertEqual(125, run["active_time_ms"])
             self.assertEqual(60_100, run["wall_time_ms"])
             self.assertEqual(50, run["token_usage"]["total_tokens"])

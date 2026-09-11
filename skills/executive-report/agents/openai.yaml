@@ -1,4 +1,0 @@
-interface:
-  display_name: "Executive Report"
-  short_description: "Create evidence-backed executive reports"
-  default_prompt: "Use $executive-report to turn the analysis into an executive-ready report."

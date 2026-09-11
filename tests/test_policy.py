@@ -6,14 +6,14 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from minimal_agent.auth import User
-from minimal_agent.harness import AgentSpec, HarnessEngine
-from minimal_agent.policy import ApprovalStore, PolicyError, PolicyGateway, ToolPolicy
-from minimal_agent.session import SessionStore
-from minimal_agent.skills import SkillRuntime
-from minimal_agent.tools import Tool, ToolRegistry
-from minimal_agent.web import FeedbackWebApp
-from minimal_agent.work_items import WorkItemStore
+from billguard.auth import User
+from billguard.harness import AgentSpec, HarnessEngine
+from billguard.policy import ApprovalStore, PolicyError, PolicyGateway, ToolPolicy
+from billguard.session import SessionStore
+from billguard.skills import SkillRuntime
+from billguard.tools import Tool, ToolRegistry
+from billguard.web import BillGuardApp
+from billguard.work_items import WorkItemStore
 
 
 class QueueLLM:
@@ -207,12 +207,12 @@ class WebApprovalTests(unittest.TestCase):
             ])
             gateway = PolicyGateway(ApprovalStore(root / "web" / "policy"))
             approver = User("approver", "approver")
-            app = FeedbackWebApp(
+            app = BillGuardApp(
                 root / "web", root / "docs", llm,
                 FakeWorkItemManager(work_items), gateway, work_items,
             )
 
-            paused = app.chat(approver, "approval-session", "$executive-report create issue")
+            paused = app.chat(approver, "approval-session", "$monthly-guard-report create issue")
             self.assertEqual("approval_pending", paused["status"])
             self.assertEqual("pending", work_items.approval(remote["approval_id"])["status"])
 

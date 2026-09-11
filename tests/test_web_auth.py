@@ -4,14 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from minimal_agent.auth import AuthError, PermissionDenied, User, UserStore
-from minimal_agent.feedback import FeedbackService
-from minimal_agent.web import FeedbackWebApp
+from billguard.auth import AuthError, PermissionDenied, User, UserStore
+from billguard.bills import BillService
+from billguard.web import BillGuardApp
 
 
-def build_app(root: Path) -> FeedbackWebApp:
-    from minimal_agent.agents import FeedbackMockLLM
-    return FeedbackWebApp(root / "web", root / "docs", FeedbackMockLLM())
+def build_app(root: Path) -> BillGuardApp:
+    from billguard.agents import BillMockLLM
+    return BillGuardApp(root / "web", root / "docs", BillMockLLM())
 
 
 def make_users(root: Path) -> UserStore:
@@ -45,16 +45,16 @@ class SessionOwnershipTests(unittest.TestCase):
                 with self.assertRaises(PermissionDenied):
                     method_args()
             # 归属留痕
-            from minimal_agent.session import SessionStore
+            from billguard.session import SessionStore
             self.assertEqual("alice",
-                             SessionStore(root / "web" / "feedback_sessions").load("s-alice").owner)
+                             SessionStore(root / "web" / "billguard" / "sessions").load("s-alice").owner)
 
     def test_ownerless_legacy_session_admin_only(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             app = build_app(root)
-            from minimal_agent.session import SessionStore
-            store = SessionStore(root / "web" / "feedback_sessions")
+            from billguard.session import SessionStore
+            store = SessionStore(root / "web" / "billguard" / "sessions")
             store.save(store.load("legacy"))  # 无主旧文件
             boss = User("admin", "admin")
             mallory = User("mallory", "viewer")
@@ -70,8 +70,8 @@ class SessionOwnershipTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             app = build_app(root)
-            from minimal_agent.session import SessionStore
-            store = SessionStore(root / "web" / "feedback_sessions")
+            from billguard.session import SessionStore
+            store = SessionStore(root / "web" / "billguard" / "sessions")
             app.chat(User("mallory", "viewer"), "fresh", "总结问题")
             self.assertEqual("mallory", store.load("fresh").owner)
 
@@ -91,32 +91,35 @@ class ServerSideIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             app = build_app(root)
-            service = FeedbackService(root / "web" / "feedback")
-            service.import_csv("demo.csv",
-                               "ticket_id,created_at,content\nTK-1,2026-08-04 10:30:00,微信支付失败\n")
+            service = BillService(root / "web" / "billguard" / "bills")
+            service.import_bills(
+                "demo.csv",
+                "tx_id,paid_at,merchant,amount\nTX-1,2026-08-04 10:30:00,美团外卖,32.5\n")
             alice = User("alice", "approver")
             # 请求体里的 operator 一律忽略,取服务端身份
-            result = app.update_feedback_tags(
-                alice, {"ticket_id": "TK-1", "tags": ["支付"], "operator": "ghost"})
-            self.assertEqual("alice", result["result"]["operator"])
-            # brief 笔误:update_tags 落库到 tag_audit_logs(无公开读取方法),直接查库验证留痕
-            import sqlite3
-            conn = sqlite3.connect(service.db_path)
-            row = conn.execute(
-                "SELECT operator FROM tag_audit_logs WHERE ticket_id='TK-1' ORDER BY id DESC").fetchone()
-            conn.close()  # Windows:显式关闭,否则临时目录清理时 db 仍被占用
-            self.assertEqual("alice", row[0])
+            result = app.update_workflow(alice, {
+                "tx_ids": ["TX-1"],
+                "updates": {"status": "待核查", "note": "疑似重复", "operator": "ghost"},
+                "operator": "ghost"})
+            self.assertEqual("alice", result["operator"])
+            audits = service.transaction_audits("TX-1")
+            self.assertEqual("alice", audits[-1]["operator"])
+            # 类别改判同样取服务端身份
+            recategorized = app.update_transaction_category(
+                alice, {"tx_id": "TX-1", "category": "订阅", "operator": "ghost"})
+            self.assertEqual("alice", recategorized["result"]["operator"])
+            self.assertEqual("alice", service.transaction_audits("TX-1")[-1]["operator"])
 
     def test_decide_approval_uses_server_identity_and_blocks_viewer(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             users = make_users(root)
-            from minimal_agent.agents import FeedbackMockLLM
-            from minimal_agent.work_items import WorkItemStore
-            from minimal_agent.policy import ApprovalStore, PolicyGateway
+            from billguard.agents import BillMockLLM
+            from billguard.work_items import WorkItemStore
+            from billguard.policy import ApprovalStore, PolicyGateway
             from types import SimpleNamespace
-            from minimal_agent.tools import Tool, ToolRegistry
-            from minimal_agent.policy import ToolPolicy
+            from billguard.tools import Tool, ToolRegistry
+            from billguard.policy import ToolPolicy
 
             work_items = WorkItemStore(root / "work-items")
             remote = work_items.prepare_issue("Fix checkout", "Investigate failures", "high")
@@ -151,12 +154,12 @@ class ServerSideIdentityTests(unittest.TestCase):
                     return json.dumps({"thought": "done", "final": "Issue created"}, ensure_ascii=False)
 
             gateway = PolicyGateway(ApprovalStore(root / "web" / "policy"))
-            app = FeedbackWebApp(root / "web", root / "docs", ScriptedLLM(), FakeManager(),
-                                 gateway, work_items)
+            app = BillGuardApp(root / "web", root / "docs", ScriptedLLM(), FakeManager(),
+                               gateway, work_items)
             alice = User("alice", "approver")
             mallory = User("mallory", "viewer")
 
-            paused = app.chat(alice, "s-approve", "$executive-report create issue")
+            paused = app.chat(alice, "s-approve", "$monthly-guard-report create issue")
             self.assertEqual("approval_pending", paused["status"])
             with self.assertRaises(PermissionDenied):  # viewer 无审批能力
                 app.decide_approval(mallory, "s-approve",
@@ -179,13 +182,21 @@ class WorkflowOperatorKeyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             app = build_app(root)
-            service = FeedbackService(root / "web" / "feedback")
-            service.import_csv("demo.csv",
-                               "ticket_id,created_at,content\nTK-1,2026-08-04 10:30:00,微信支付失败\n")
+            service = BillService(root / "web" / "billguard" / "bills")
+            service.import_bills(
+                "demo.csv",
+                "tx_id,paid_at,merchant,amount\nTX-1,2026-08-04 10:30:00,美团外卖,32.5\n")
             result = app.update_workflow(User("alice", "approver"), {
-                "ticket_ids": ["TK-1"],
-                "updates": {"status": "处理中", "operator": "ghost"},
+                "tx_ids": ["TX-1"],
+                "updates": {"status": "核查中", "note": "正在核对", "operator": "ghost"},
                 "operator": "ghost"})
             self.assertEqual(1, result["count"])
-            audits = service.feedback_audits("TK-1")
+            audits = service.transaction_audits("TX-1")
             self.assertEqual("alice", audits[-1]["operator"])
+            # 非法 status 与超长备注按现有校验风格拒绝
+            with self.assertRaises(ValueError):
+                app.update_workflow(User("alice", "approver"),
+                                    {"tx_ids": ["TX-1"], "updates": {"status": "处理中"}})
+            with self.assertRaises(ValueError):
+                app.update_workflow(User("alice", "approver"),
+                                    {"tx_ids": ["TX-1"], "updates": {"status": "正常", "note": "长" * 201}})
