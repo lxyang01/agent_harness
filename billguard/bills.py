@@ -873,7 +873,9 @@ class BillService:
             raise ToolError("tx_id 和 category 不能为空")
         now = _now()
         with self._connect() as db:
+            # 别名片段只用于带 t 别名的 SELECT;UPDATE 语句无别名,须用裸 owner 片段
             owner_and, owner_params = self._owner_and(owner, "t.owner")
+            owner_and_plain, plain_params = self._owner_and(owner)
             row = db.execute(
                 f"""SELECT t.tx_id, COALESCE(c.name, '未分类') AS category FROM transactions t
                    LEFT JOIN categories c ON c.id=t.category_id WHERE t.tx_id=?{owner_and}""",
@@ -881,8 +883,8 @@ class BillService:
             if not row:
                 raise ToolError(f"交易不存在:{tx_id}")
             category_id = self._ensure_category(db, category, now, owner)
-            db.execute(f"UPDATE transactions SET category_id=? WHERE tx_id=?{owner_and}",
-                       (category_id, tx_id, *owner_params))
+            db.execute(f"UPDATE transactions SET category_id=? WHERE tx_id=?{owner_and_plain}",
+                       (category_id, tx_id, *plain_params))
             db.execute(
                 """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at, owner)
                    VALUES (?, 'category', ?, ?, ?, ?)""",

@@ -74,6 +74,25 @@ class ScopedDataTests(unittest.TestCase):
             self.assertEqual("待核查", bob.query()["items"][0]["status"])
             self.assertEqual(1, len(bob.transaction_audits("TX-1")))
 
+    def test_update_transaction_category_within_owner_scope(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service = BillService(Path(temp))
+            bob = service.for_user("bob")
+            alice = service.for_user("alice")
+            bob.import_bills("demo.csv", DEMO)
+            alice.import_bills("demo.csv", DEMO)
+            result = bob.update_transaction_category("TX-1", "娱乐")
+            self.assertEqual("订阅", result["old_category"])
+            self.assertEqual("娱乐", result["new_category"])
+            row = next(item for item in bob.query()["items"] if item["tx_id"] == "TX-1")
+            self.assertEqual("娱乐", row["category"])
+            audits = bob.transaction_audits("TX-1")
+            self.assertEqual("bob", audits[-1]["owner"])
+            self.assertEqual("web-user", audits[-1]["operator"])
+            # 同号交易的另一 owner 行不受影响
+            alice_row = next(item for item in alice.query()["items"] if item["tx_id"] == "TX-1")
+            self.assertEqual("订阅", alice_row["category"])
+
     def test_for_user_rejects_empty_owner(self):
         with tempfile.TemporaryDirectory() as temp:
             service = BillService(Path(temp))
