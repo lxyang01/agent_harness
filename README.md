@@ -27,10 +27,11 @@ python -m minimal_agent.web
 打开 <http://127.0.0.1:8000> 登录(角色:admin=用户管理+全部业务,approver=业务写入+审批,viewer=只读+对话),进入"导入记录"导入:
 
 ```text
-sample_data/customer_feedback_demo.csv
+sample_data/bills_demo.csv
+sample_data/subscriptions_demo.csv
 ```
 
-即可查看看板并向洞察 Agent 提问。默认离线 Mock 模式,不需要 API Key。
+即可查看看板并向账单守卫 Agent 提问。默认离线 Mock 模式,不需要 API Key。
 
 切换 OpenRouter 真实模型(同一窗口设置环境变量后启动):
 

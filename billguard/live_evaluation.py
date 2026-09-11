@@ -408,18 +408,22 @@ def summarize_live_results(results: list[dict[str, Any]], case_count: int,
 
 
 def _shift_fixture_to_today(source: Path) -> str:
-    # 数据集仍是反馈域,待 T7 换成账单数据集后此函数随之迁移。
+    # 账单样例(bills_demo.csv)整体平移到评测当天,时间跨度不变;
+    # 兼容旧反馈域数据集的 created_at 列。
     rows = list(csv.DictReader(source.read_text(encoding="utf-8-sig").splitlines()))
     if not rows:
-        raise ValueError("feedback fixture is empty")
-    dates = [datetime.fromisoformat(row["created_at"]) for row in rows]
+        raise ValueError("bills fixture is empty")
+    date_field = next((name for name in ("paid_at", "created_at") if rows[0].get(name)), None)
+    if date_field is None:
+        raise ValueError("fixture 缺少 paid_at/created_at 时间列")
+    dates = [datetime.fromisoformat(row[date_field]) for row in rows]
     delta = datetime.now().date() - max(dates).date()
     output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=list(rows[0]))
     writer.writeheader()
-    for row, created_at in zip(rows, dates):
+    for row, stamp in zip(rows, dates):
         row = dict(row)
-        row["created_at"] = (created_at + delta).strftime("%Y-%m-%d %H:%M:%S")
+        row[date_field] = (stamp + delta).strftime("%Y-%m-%d %H:%M:%S")
         writer.writerow(row)
     return output.getvalue()
 
@@ -449,9 +453,9 @@ class LiveEvaluationRunner:
             bills_dir = root / "billguard" / "bills"
             work_item_dir = root / "work-items"
             sessions_dir = root / "sessions"
-            fixture = self.project_root / "sample_data" / "customer_feedback_demo.csv"
+            fixture = self.project_root / "sample_data" / "bills_demo.csv"
             csv_text = _shift_fixture_to_today(fixture)
-            # 数据集仍是反馈域(待 T7);这里只统计行数作为报告元数据,
+            # 账单样例仅统计行数作为报告元数据;
             # 账单 MCP 侧初始化一个空库 + 默认类别即可支撑用例运行。
             fixture_rows = sum(1 for _ in csv.DictReader(io.StringIO(csv_text)))
             BillService(bills_dir)
@@ -514,7 +518,7 @@ class LiveEvaluationRunner:
             "temperature": getattr(self.llm, "temperature", None),
             "dataset_size": len(cases),
             "repeats": repeats,
-            "fixture": "sample_data/customer_feedback_demo.csv (dates shifted to evaluation day)",
+            "fixture": "sample_data/bills_demo.csv (dates shifted to evaluation day)",
             "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
             "fixture_rows": fixture_rows,
             "duration_ms": round((time.perf_counter() - started) * 1000, 2),
