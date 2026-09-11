@@ -978,6 +978,19 @@ class BillService:
         self._ensure_user_categories(owner)
         return _ScopedBills(self, owner)
 
+    def scoped_or_legacy(self, owner: str = "") -> "_ScopedBills":
+        """MCP bill 服务器的数据边界原语。
+
+        非空 owner 与 for_user 同义(本人视图 + 默认类别播种);空串在这里是
+        合法边界——“仅存量 NULL 行”(_owner_clause 的空串分支),对应服务器端
+        未注入身份时的默认形态。for_user 拒绝空 owner(web 层的真实身份不允许
+        为空),所以这里直接构造 _ScopedBills(self, "") 表达 NULL-only 语义,
+        仅限服务端注入链路使用,不经用户输入直取。"""
+        owner = str(owner or "").strip()
+        if owner:
+            return self.for_user(owner)
+        return _ScopedBills(self, "")
+
     def _ensure_user_categories(self, owner: str) -> None:
         """首次访问时为无任何类别的 owner 播种默认类别副本(带 owner 戳)。"""
         with self._connect() as db:

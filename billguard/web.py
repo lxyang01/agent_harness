@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import mimetypes
 import sys
 import threading
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -23,7 +25,7 @@ from .mcp_runtime import MCPClientManager
 from .observability import TraceStore
 from .policy import ApprovalStore, PolicyError, PolicyGateway
 from .session import SessionStore
-from .tools import ToolError
+from .tools import Tool, ToolRegistry, ToolError
 from .work_items import WorkItemError, WorkItemStore
 
 
@@ -32,6 +34,38 @@ STATIC_ROOT = Path(__file__).with_name("web_static")
 
 class BusyError(RuntimeError):
     """429: all model-concurrency slots are taken; retry shortly."""
+
+
+def inject_owner_identity(registry: ToolRegistry, username: str) -> ToolRegistry:
+    """MCP 模式的 owner 身份注入:bill.* 工具只能以当前登录用户执行。
+
+    - handler 包装:arguments["owner"] 一律覆盖为服务端身份,模型伪造的
+      owner(如他人用户名)在到达 MCP 服务器前就被覆盖;
+    - Schema 隐藏:properties/required 移除 owner,模型侧根本看不到该参数;
+    - 非 bill.* 工具(如 work-items.*)原样透传,不受影响。
+
+    返回替换后的新注册表;入参注册表保持不变,需要恢复时直接弃用返回值即可。
+    """
+    injected = ToolRegistry()
+    for name in registry.names():
+        tool = registry.get(name)
+        if name.startswith("bill."):
+            def wrapped(_original: Any = tool.handler, _owner: str = username,
+                        **arguments: Any) -> Any:
+                # 服务端身份强制覆盖,防模型伪造跨 owner 访问
+                arguments["owner"] = _owner
+                return _original(**arguments)
+
+            parameters = copy.deepcopy(tool.parameters)
+            properties = parameters.get("properties")
+            if isinstance(properties, dict):
+                properties.pop("owner", None)
+            if isinstance(parameters.get("required"), list):
+                parameters["required"] = [key for key in parameters["required"]
+                                          if key != "owner"]
+            tool = replace(tool, handler=wrapped, parameters=parameters)
+        injected.register(tool)
+    return injected
 
 
 class BillGuardApp:
@@ -215,10 +249,14 @@ class BillGuardApp:
         if self.mcp_manager is None:
             # 本地模式:工具注册表按当前用户装配受限视图,Agent 只能查/写本人数据
             return create_bill_agent(self.llm, session_id, self.session_dir, self._scoped(user))
-        # MCP 模式按原样装配(注入在数据隔离后续任务处理)
+        # MCP 模式:工具注册完成后按当前用户注入 owner 身份(模型不可见、不可伪造)
+        registry = ToolRegistry()
+        for snapshot in self.mcp_manager.snapshots():
+            self.mcp_manager.register_tools(registry, snapshot.name)
         return create_mcp_bill_agent(
             self.llm, session_id, self.mcp_manager, self.session_dir,
             policy_gateway=self.policy_gateway,
+            registry=inject_owner_identity(registry, user.username),
         )
 
     def decide_approval(self, user: Any, session_id: str, body: dict[str, Any]) -> dict[str, Any]:

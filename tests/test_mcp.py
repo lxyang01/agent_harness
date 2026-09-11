@@ -179,6 +179,74 @@ BG-004,2026-09-05 20:00:00,爱奇艺,订阅,35.0,支付宝,视频会员自动续
             self.manager.call_tool("bill", "aggregate", {})
 
 
+LEGACY_CSV = """tx_id,paid_at,merchant,category,amount,method,note
+LEG-1,2026-09-01 09:00:00,水费中心,居住,40.0,微信,存量账单
+LEG-2,2026-09-02 10:00:00,电费中心,居住,60.0,微信,存量账单
+"""
+
+ALICE_CSV = """tx_id,paid_at,merchant,category,amount,method,note
+AL-1,2026-09-01 12:30:00,美团,餐饮,35.5,支付宝,午餐
+AL-2,2026-09-03 20:00:00,爱奇艺,订阅,35.0,支付宝,视频会员
+"""
+
+
+class BillServerOwnerScopeTests(unittest.TestCase):
+    """bill_server 的 owner 边界:空 owner 仅见存量 NULL 行,具名 owner 仅见本人行。"""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.bills_dir = self.root / "bills"
+        service = BillService(self.bills_dir)
+        service.import_bills("legacy.csv", LEGACY_CSV)  # owner=None → 存量 NULL 行
+        service.for_user("alice")  # 首访播种 alice 的默认类别
+        service.import_bills("alice.csv", ALICE_CSV, owner="alice")
+        self.manager = MCPClientManager(request_timeout=15)
+        self.snapshot = self.manager.connect_stdio(
+            "bill", sys.executable,
+            ["-u", "-m", "billguard.mcp_servers.bill_server",
+             "--data-dir", str(self.bills_dir)],
+            cwd=PROJECT_ROOT, env=mcp_subprocess_env(),
+        )
+
+    def tearDown(self) -> None:
+        self.manager.close()
+        self.temp.cleanup()
+
+    def test_default_and_empty_owner_see_only_legacy_null_rows(self):
+        # 服务器广播的 schema 含 owner 参数(供 Host 注入,web 层再对模型隐藏)
+        tool = next(item for item in self.snapshot.tools if item.name == "aggregate")
+        self.assertIn("owner", tool.input_schema["properties"])
+        self.assertNotIn("owner", tool.input_schema.get("required", []))
+        # 不传 owner(默认形态)与显式空串同义:仅存量 NULL 视图
+        for arguments in ({}, {"owner": ""}):
+            with self.subTest(arguments=arguments):
+                result = self.manager.call_tool("bill", "aggregate", arguments)
+                self.assertEqual(2, result["count"])
+                self.assertEqual(100.0, result["total_amount"])
+                self.assertEqual({"水费中心", "电费中心"},
+                                 {item["name"] for item in result["top_merchants"]})
+
+    def test_named_owner_sees_only_own_rows(self):
+        result = self.manager.call_tool("bill", "aggregate", {"owner": "alice"})
+        self.assertEqual(2, result["count"])
+        self.assertEqual(70.5, result["total_amount"])
+        self.assertEqual({"美团", "爱奇艺"},
+                         {item["name"] for item in result["top_merchants"]})
+        # 具名 owner 的写入也按本人边界:存量行不在 alice 视野,更新 0 行不报错
+        updated = self.manager.call_tool("bill", "update_status", {
+            "tx_ids": ["LEG-1"], "status": "待核查", "operator": "alice",
+            "owner": "alice",
+        })
+        self.assertEqual(0, updated["count"])
+        # 空 owner 视图可更新存量行(存量数据的看护者语义)
+        legacy_update = self.manager.call_tool("bill", "update_status", {
+            "tx_ids": ["LEG-1"], "status": "待核查", "operator": "legacy-keeper",
+        })
+        self.assertEqual(1, legacy_update["count"])
+        self.assertEqual(["LEG-1"], legacy_update["updated_tx_ids"])
+
+
 class WorkItemMCPIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()

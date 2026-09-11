@@ -4,9 +4,10 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from billguard.bills import BillService
-from billguard.tools import ToolError
+from billguard.tools import Tool, ToolError, ToolRegistry
 
 DEMO = ("tx_id,paid_at,merchant,category,amount,method,note\n"
         "TX-1,2026-08-05 21:00:00,腾讯视频,订阅,25.0,微信,月费\n")
@@ -150,6 +151,124 @@ class WebScopedTests(unittest.TestCase):
             result = registry.execute("bill_search", {"query": "腾讯", "limit": 5})
             self.assertEqual(1, result["total"])
             self.assertIn("[订单号]", result["items"][0]["note"])
+
+
+DEMO_ALICE = ("tx_id,paid_at,merchant,category,amount,method,note\n"
+              "AL-1,2026-08-05 12:00:00,盒马鲜生,购物,120.0,支付宝,生鲜采购\n")
+
+
+class _OwnerProbeManager:
+    """MCP 假管理器:bill.* 工具直达真实 BillService,并记录每次调用到达服务的 owner。
+    schema 与真实 FastMCP 广播形态同构:owner 在 properties、不在 required、
+    无 additionalProperties 限制(伪造的 owner 参数可以到达 handler,由包装层覆盖)。"""
+
+    def __init__(self, service: BillService) -> None:
+        self.service = service
+        self.seen_owners: list[str | None] = []
+
+    def snapshots(self):
+        return [SimpleNamespace(name="bill", transport="test", server_name="t",
+                                server_version="t", protocol_version="t",
+                                tools=(), resources=(), prompts=())]
+
+    def register_tools(self, registry: ToolRegistry, server_name: str) -> tuple:
+        registry.register(Tool(
+            "bill.aggregate", "Aggregate bills",
+            {"type": "object", "properties": {
+                "merchant": {"type": "string"},
+                "owner": {"type": "string"},
+            }},
+            self._aggregate))
+        registry.register(Tool(
+            "bill.update_status", "Update workflow status",
+            {"type": "object", "properties": {
+                "tx_ids": {"type": "array", "items": {"type": "string"}},
+                "status": {"type": "string"},
+                "operator": {"type": "string"},
+                "owner": {"type": "string"},
+            }, "required": ["tx_ids", "status", "operator"]},
+            self._update_status))
+        # 非 bill.* 前缀的工具必须原样透传,不受注入影响
+        registry.register(Tool(
+            "work-items.list_issues", "List work items",
+            {"type": "object", "properties": {"owner": {"type": "string"}}},
+            self._list_issues))
+        return registry.names()
+
+    def _aggregate(self, **kwargs):
+        owner = kwargs.get("owner")
+        self.seen_owners.append(owner)
+        return self.service.overview(owner=owner)
+
+    def _update_status(self, **kwargs):
+        owner = kwargs.pop("owner", None)
+        self.seen_owners.append(owner)
+        return self.service.update_workflow(
+            kwargs["tx_ids"], kwargs["operator"],
+            status=kwargs["status"], owner=owner)
+
+    def _list_issues(self, **kwargs):
+        self.seen_owners.append(kwargs.get("owner"))
+        return {"count": 0}
+
+
+class OwnerInjectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.service = BillService(Path(self.temp.name))
+        self.service.import_bills("legacy.csv", DEMO)  # owner=None → 存量 NULL 行
+        self.service.for_user("alice").import_bills("alice.csv", DEMO_ALICE)
+        self.manager = _OwnerProbeManager(self.service)
+
+    def _registry(self) -> ToolRegistry:
+        registry = ToolRegistry()
+        self.manager.register_tools(registry, "bill")
+        return registry
+
+    def test_model_forged_owner_is_overwritten(self):
+        from billguard.web import inject_owner_identity
+        registry = inject_owner_identity(self._registry(), "alice")
+        result = registry.execute("bill.aggregate", {"owner": "mallory"})
+        # 到达服务的 owner 是注入的服务端身份,模型伪造值被覆盖
+        self.assertEqual(["alice"], self.manager.seen_owners)
+        self.assertEqual(1, result["count"])
+        self.assertEqual({"盒马鲜生"},
+                         {item["name"] for item in result["top_merchants"]})
+        # 写路径同样受边界保护:存量 NULL 行不在 alice 视野,伪造 mallory 也改不到
+        update = registry.execute("bill.update_status", {
+            "tx_ids": ["TX-1"], "status": "待核查", "operator": "model",
+            "owner": "mallory",
+        })
+        self.assertEqual(0, update["count"])
+        self.assertEqual(["alice", "alice"], self.manager.seen_owners)
+
+    def test_schema_hides_owner_from_model(self):
+        from billguard.web import inject_owner_identity
+        registry = inject_owner_identity(self._registry(), "alice")
+        parameters = registry.get("bill.aggregate").parameters
+        self.assertNotIn("owner", parameters.get("properties", {}))
+        self.assertNotIn("owner", parameters.get("required", []))
+        # 模型侧实际拿到的 schema 同样不含 owner
+        schema = next(item for item in registry.schemas(registry.names())
+                      if item["name"] == "bill.aggregate")
+        self.assertNotIn("owner", schema["parameters"].get("properties", {}))
+        # work-items.* 原样透传:handler 未包装,owner 参数保留可用
+        self.assertIn("owner", registry.get("work-items.list_issues").parameters["properties"])
+        registry.execute("work-items.list_issues", {"owner": "someone-else"})
+        self.assertEqual("someone-else", self.manager.seen_owners[-1])
+
+    def test_agent_mcp_tools_carry_server_identity(self):
+        # web MCP 分支:_agent 产出的注册表已按登录用户注入,伪造 owner 无效
+        from billguard.agents import BillMockLLM
+        from billguard.auth import User
+        from billguard.web import BillGuardApp
+        app = BillGuardApp(Path(self.temp.name) / "web", Path(self.temp.name) / "docs",
+                           BillMockLLM(), self.manager)
+        agent = app._agent(User("alice", "viewer"), "s-inject")
+        result = agent.tools.execute("bill.aggregate", {"owner": "mallory"})
+        self.assertEqual(["alice"], self.manager.seen_owners)
+        self.assertEqual(1, result["count"])
 
 
 if __name__ == "__main__":
