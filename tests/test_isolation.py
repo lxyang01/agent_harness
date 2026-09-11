@@ -51,6 +51,29 @@ class ScopedDataTests(unittest.TestCase):
             self.assertIn("餐饮", names)
             self.assertIn("订阅", names)
 
+    def test_same_csv_imports_independently_per_owner(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service = BillService(Path(temp))
+            alice = service.for_user("alice")
+            bob = service.for_user("bob")
+            first = alice.import_bills("demo.csv", DEMO)
+            second = bob.import_bills("demo.csv", DEMO)
+            # 相同编号的账单文件,各 owner 各自完整入库
+            self.assertEqual(first["imported_rows"], second["imported_rows"])
+            self.assertEqual(0, second["duplicate_rows"])
+            self.assertEqual(1, alice.overview()["count"])
+            self.assertEqual(1, bob.overview()["count"])
+            # 同一 owner 重复导入仍按自己的数据去重
+            again = alice.import_bills("demo.csv", DEMO)
+            self.assertEqual(0, again["imported_rows"])
+            self.assertEqual(1, again["duplicate_rows"])
+            # 同编号交易的工单/审计按 owner 作用域
+            result = bob.update_workflow(["TX-1"], "bob", status="待核查")
+            self.assertEqual(1, result["count"])
+            self.assertEqual("正常", alice.query()["items"][0]["status"])
+            self.assertEqual("待核查", bob.query()["items"][0]["status"])
+            self.assertEqual(1, len(bob.transaction_audits("TX-1")))
+
     def test_for_user_rejects_empty_owner(self):
         with tempfile.TemporaryDirectory() as temp:
             service = BillService(Path(temp))

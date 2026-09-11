@@ -128,10 +128,10 @@ class BillService:
                     keywords TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL, owner TEXT);
                 CREATE TABLE IF NOT EXISTS transactions(
-                    tx_id TEXT PRIMARY KEY, paid_at TEXT NOT NULL, merchant TEXT NOT NULL,
-                    note TEXT NOT NULL DEFAULT '', category_id INTEGER REFERENCES categories(id),
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, tx_id TEXT NOT NULL, paid_at TEXT NOT NULL,
+                    merchant TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', category_id INTEGER REFERENCES categories(id),
                     amount REAL NOT NULL, method TEXT NOT NULL DEFAULT '未知',
-                    status TEXT NOT NULL DEFAULT '正常', created_at TEXT NOT NULL);
+                    status TEXT NOT NULL DEFAULT '正常', created_at TEXT NOT NULL, owner TEXT);
                 CREATE INDEX IF NOT EXISTS idx_tx_paid_at ON transactions(paid_at);
                 CREATE INDEX IF NOT EXISTS idx_tx_merchant ON transactions(merchant);
                 CREATE TABLE IF NOT EXISTS subscriptions(
@@ -154,10 +154,13 @@ class BillService:
                     created_at TEXT NOT NULL);
             """)
             # 阶段 3:业务表补 owner 列(存量行保持 NULL = 仅 admin 可见)
+            tx_had_surrogate = False
             for table in ("transactions", "categories", "subscriptions",
                           "tx_audits", "imports", "reports"):
                 columns = {row["name"] for row in db.execute(
                     f"PRAGMA table_info({table})")}
+                if table == "transactions":
+                    tx_had_surrogate = "id" in columns
                 if "owner" not in columns:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN owner TEXT")
             # 旧库 categories.name 是全局唯一,须重建为按 (owner, name) 唯一,
@@ -177,6 +180,27 @@ class BillService:
                 db.execute("ALTER TABLE categories_rebuild RENAME TO categories")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_owner_name"
                        " ON categories(COALESCE(owner, ''), name)")
+            # 旧库 transactions.tx_id 是全局主键,须重建为代理主键 + (owner, tx_id) 复合唯一,
+            # 否则不同 owner 无法各自导入相同编号的账单
+            if not tx_had_surrogate:
+                db.execute("PRAGMA foreign_keys=OFF")
+                db.execute("DROP TABLE IF EXISTS transactions_rebuild")
+                db.execute("""CREATE TABLE transactions_rebuild(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, tx_id TEXT NOT NULL, paid_at TEXT NOT NULL,
+                    merchant TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+                    category_id INTEGER REFERENCES categories(id), amount REAL NOT NULL,
+                    method TEXT NOT NULL DEFAULT '未知', status TEXT NOT NULL DEFAULT '正常',
+                    created_at TEXT NOT NULL, owner TEXT)""")
+                db.execute("""INSERT INTO transactions_rebuild(tx_id, paid_at, merchant, note, category_id,
+                    amount, method, status, created_at, owner)
+                    SELECT tx_id, paid_at, merchant, note, category_id, amount, method, status, created_at, owner
+                    FROM transactions""")
+                db.execute("DROP TABLE transactions")
+                db.execute("ALTER TABLE transactions_rebuild RENAME TO transactions")
+                db.execute("CREATE INDEX IF NOT EXISTS idx_tx_paid_at ON transactions(paid_at)")
+                db.execute("CREATE INDEX IF NOT EXISTS idx_tx_merchant ON transactions(merchant)")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_owner_tx"
+                       " ON transactions(COALESCE(owner, ''), tx_id)")
             # 仅在空库时播种默认类别,避免删光后重启又复活
             if db.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 0:
                 now = _now()
@@ -288,6 +312,7 @@ class BillService:
         now = _now()
         with self._connect() as db:
             rules = self._category_rules(db, owner)
+            owner_and, owner_params = self._owner_and(owner)
             for line_number, row in enumerate(reader, start=2):
                 total += 1
                 try:
@@ -300,16 +325,18 @@ class BillService:
                     method = str(row.get(columns.get("method", ""), "未知")).strip() or "未知"
                     note = str(row.get(columns.get("note", ""), "")).strip()
                     category_name = str(row.get(columns.get("category", ""), "")).strip()
+                    # 去重按 (owner, tx_id) 复合唯一:同号账单可在不同 owner 名下各自入库
                     cursor = db.execute(
                         """INSERT INTO transactions(tx_id, paid_at, merchant, note, amount, method, created_at, owner)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(tx_id) DO NOTHING""",
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING""",
                         (tx_id, paid_at, merchant, note, amount, method, now, owner))
                     if cursor.rowcount == 0:
                         duplicates += 1
                         continue
                     imported += 1
                     category_id = self._resolve_category(db, rules, category_name, merchant, note, now, owner)
-                    db.execute("UPDATE transactions SET category_id=? WHERE tx_id=?", (category_id, tx_id))
+                    db.execute(f"UPDATE transactions SET category_id=? WHERE tx_id=?{owner_and}",
+                               (category_id, tx_id, *owner_params))
                 except (ValueError, TypeError) as exc:
                     failed += 1
                     if len(errors) < 20:
@@ -753,6 +780,7 @@ class BillService:
         with self._connect() as db:
             rules = self._category_rules(db, owner)
             owner_where, owner_params = self._owner_where(owner)
+            owner_and, _ = self._owner_and(owner)
             other_id = None
             changed = total = 0
             for row in db.execute(
@@ -767,7 +795,8 @@ class BillService:
                         other_id = self._ensure_category(db, "其他", now, owner)
                     new_id = other_id
                 if new_id != row["category_id"]:
-                    db.execute("UPDATE transactions SET category_id=? WHERE tx_id=?", (new_id, row["tx_id"]))
+                    db.execute(f"UPDATE transactions SET category_id=? WHERE tx_id=?{owner_and}",
+                               (new_id, row["tx_id"], *owner_params))
                     db.execute(
                         """INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at, owner)
                            VALUES (?, 'category', ?, ?, ?, ?)""",
@@ -811,9 +840,11 @@ class BillService:
                            owner: str | None = None) -> list[dict[str, Any]]:
         with self._connect() as db:
             owner_and, owner_params = self._owner_and(owner, "t.owner")
+            # 同号交易可在多个 owner 名下,EXISTS 避免 JOIN 拉出重复审计行
             return [dict(row) for row in db.execute(
-                f"""SELECT a.* FROM tx_audits a JOIN transactions t ON t.tx_id=a.tx_id
-                    WHERE a.tx_id=?{owner_and} ORDER BY a.id LIMIT ?""",
+                f"""SELECT a.* FROM tx_audits a WHERE a.tx_id=? AND EXISTS
+                    (SELECT 1 FROM transactions t WHERE t.tx_id=a.tx_id{owner_and})
+                    ORDER BY a.id LIMIT ?""",
                 (tx_id, *owner_params, min(max(1, limit), 200)))]
 
     def recent_audits(self, limit: int = 50, owner: str | None = None) -> list[dict[str, Any]]:
