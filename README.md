@@ -2,7 +2,7 @@
 
 让 LLM Agent 直接碰业务数据是不可信的:它会编数字、越权调工具、被账单备注里的提示注入带着跑,写操作更没人拦。BillGuard 是这个问题的一个完整工程答案 —— 一个**框架无关的可审计 Agent Harness**,以"分层防线 + 可验证"为设计原则,业务载体是个人账单守卫:从账单与订阅 CSV 中发现涨价、重复扣费和大额离群,输出带证据的行动计划。
 
-每一层防线都可独立验证:**22 条对抗探针**(零费用、确定性)全部防御成功,160 项单元测试覆盖并发竞态、权限边界与数据隔离。
+每一层防线都可独立验证:**22 条对抗探针**(零费用、确定性)全部防御成功,154 项单元测试覆盖并发竞态、权限边界与数据隔离。
 
 | 防线 | 一句话证据 |
 | --- | --- |
@@ -56,7 +56,7 @@ TX0001,2026-06-01 11:41:15,美团外卖,餐饮,21.28,微信支付,
                      ├─ Skill Runtime(路由 + 工具白名单 + 完成契约)
                      ├─ Policy Gateway(高风险写 → Checkpoint 审批)
                      ├─ Context / Session(按用户归属)
-                     ├─ Mock or OpenAI-compatible LLM
+                     ├─ OpenAI-compatible LLM(任意兼容服务)
                      └─ JSONL Trace(全量留痕,可回放)
 ```
 
@@ -139,7 +139,7 @@ Harness 还从用户原话编译**动态契约**:"最多 8 条"变成参数上�
 ```text
 billguard/
 ├─ harness/            # Agent 内核:engine(受控循环/预算/安全停止)、spec、contracts(动态契约)、context
-├─ agents/             # 业务 Agent:bills.py(工具面+Mock)、planning.py(换载体示范)
+├─ agents/             # 业务 Agent:bills.py(工具面)、planning.py(换载体示范)
 ├─ skills.py           # Skill 发现/路由/白名单/完成规则
 ├─ policy.py           # 风险分级 + Checkpoint 审批(条件 UPDATE 乐观并发)
 ├─ bills.py            # 账单/类别/订阅存储 + 四类异常检测 + for_user 隔离视图
@@ -151,7 +151,7 @@ billguard/
 ├─ evaluation.py / live_evaluation.py  # 路由消融 / 真实模型 E2E
 └─ web_static/         # 原生 JS 前端
 skills/                # 4 个 SKILL.md + routes.json(运行时加载)
-tests/                 # 160 项:并发竞态/隔离/契约/演示回归
+tests/                 # 154 项:并发竞态/隔离/契约/审批链路(llm_doubles 脚本模型)
 evals/                 # 50 路由用例 + 15 live 用例
 sample_data/           # 带剧本的合成账单(生成器在 scripts/)
 ```
