@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from billguard.agents import BillMockLLM
+from tests.llm_doubles import ScriptedLLM
 from billguard.harness import AgentResponse, RunEvent
 from billguard.live_evaluation import (
     ArgumentRule,
@@ -87,7 +87,10 @@ class LiveEvaluationTests(unittest.TestCase):
             forbidden_tools=(), expected_status="completed", argument_rules=(),
         )
         report = LiveEvaluationRunner(
-            BillMockLLM(), PROJECT_ROOT, request_timeout=20,
+            ScriptedLLM([
+                {"thought": "查总览", "tool_call": {"name": "bill.aggregate", "arguments": {}}},
+                {"thought": "done", "final": "当前账单共若干笔支出,数据来自概览工具。"},
+            ]), PROJECT_ROOT, request_timeout=20,
         ).run([case], repeats=1)
         self.assertGreater(report["fixture_rows"], 0)
         self.assertEqual(1, report["metrics"]["runs"])

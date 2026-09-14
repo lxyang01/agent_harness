@@ -146,24 +146,27 @@ DEMO_PII = ("tx_id,paid_at,merchant,category,amount,method,note\n"
 
 class WebScopedTests(unittest.TestCase):
     def test_two_users_isolated_through_app(self):
-        from billguard.agents import BillMockLLM
+        from tests.llm_doubles import FinalLLM
         from billguard.auth import User
         from billguard.web import BillGuardApp
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            app = BillGuardApp(root / "sessions", root / "docs", BillMockLLM())
+            app = BillGuardApp(root / "sessions", root / "docs", FinalLLM())
             alice, bob = User("alice", "user"), User("bob", "user")
             app.import_bills(alice, {"filename": "d.csv", "csv_text": DEMO})
             self.assertEqual(0, app.snapshot(bob, "s1")["overview"]["count"])
             self.assertEqual(1, app.snapshot(alice, "s1")["overview"]["count"])
 
     def test_bob_chat_answers_with_own_data_only(self):
-        from billguard.agents import BillMockLLM
+        from tests.llm_doubles import ScriptedLLM
         from billguard.auth import User
         from billguard.web import BillGuardApp
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            app = BillGuardApp(root / "sessions", root / "docs", BillMockLLM())
+            app = BillGuardApp(root / "sessions", root / "docs", ScriptedLLM([
+                {"thought": "查本人总览", "tool_call": {"name": "bill_overview", "arguments": {}}},
+                {"thought": "done", "final": "共 1 笔支出(美团外卖)。"},
+            ]))
             alice, bob = User("alice", "user"), User("bob", "user")
             app.import_bills(alice, {"filename": "a.csv", "csv_text": DEMO})
             app.import_bills(bob, {"filename": "b.csv", "csv_text": DEMO_BOB})
@@ -298,11 +301,11 @@ class OwnerInjectionTests(unittest.TestCase):
 
     def test_agent_mcp_tools_carry_server_identity(self):
         # web MCP 分支:_agent 产出的注册表已按登录用户注入,伪造 owner 无效
-        from billguard.agents import BillMockLLM
+        from tests.llm_doubles import FinalLLM
         from billguard.auth import User
         from billguard.web import BillGuardApp
         app = BillGuardApp(Path(self.temp.name) / "web", Path(self.temp.name) / "docs",
-                           BillMockLLM(), self.manager)
+                           FinalLLM(), self.manager)
         agent = app._agent(User("alice", "user"), "s-inject")
         result = agent.tools.execute("bill.aggregate", {"owner": "mallory"})
         self.assertEqual(["alice"], self.manager.seen_owners)
