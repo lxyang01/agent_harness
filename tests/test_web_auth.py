@@ -13,8 +13,8 @@ DEMO = ("tx_id,paid_at,merchant,category,amount,method,note" + chr(10)
 
 
 def build_app(root: Path) -> BillGuardApp:
-    from billguard.agents import BillMockLLM
-    return BillGuardApp(root / "web", root / "docs", BillMockLLM())
+    from tests.llm_doubles import FinalLLM
+    return BillGuardApp(root / "web", root / "docs", FinalLLM())
 
 
 def make_users(root: Path) -> UserStore:
@@ -118,7 +118,7 @@ class ServerSideIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             users = make_users(root)
-            from billguard.agents import BillMockLLM
+            from tests.llm_doubles import FinalLLM
             from billguard.work_items import WorkItemStore
             from billguard.policy import ApprovalStore, PolicyGateway
             from types import SimpleNamespace
@@ -210,13 +210,13 @@ class WorkflowOperatorKeyTests(unittest.TestCase):
 
 class UserDeleteTests(unittest.TestCase):
     def _app(self, root: Path):
-        from billguard.agents import BillMockLLM
+        from tests.llm_doubles import FinalLLM
         from billguard.auth import AuthSessionStore, Authenticator, UserStore
         from billguard.web import BillGuardApp
         users = UserStore(root / "auth")
         users.create("boss", "boss-pass-1234", "admin")
         users.create("alice", "alice-pass-123", "user")
-        app = BillGuardApp(root / "web", root / "docs", BillMockLLM(),
+        app = BillGuardApp(root / "web", root / "docs", FinalLLM(),
                            authenticator=Authenticator(users, AuthSessionStore(root / "auth")))
         return app, users
 

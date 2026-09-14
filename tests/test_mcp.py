@@ -11,7 +11,8 @@ from pathlib import Path
 
 import mcp
 
-from billguard.agents import BillMockLLM, create_mcp_bill_agent
+from billguard.agents import create_mcp_bill_agent
+from tests.llm_doubles import ScriptedLLM
 from billguard.bills import BillService
 from billguard.mcp_runtime import MCPClientManager, MCPError
 from billguard.tools import ToolRegistry
@@ -146,7 +147,11 @@ BG-004,2026-09-05 20:00:00,爱奇艺,订阅,35.0,支付宝,视频会员自动续
 
     def test_harness_runs_with_dynamically_discovered_mcp_tools(self):
         agent = create_mcp_bill_agent(
-            BillMockLLM(), "mcp-session", self.manager,
+            ScriptedLLM([
+                {"thought": "查异常", "tool_call": {"name": "bill.detect_anomalies",
+                                                 "arguments": {"days": 31, "dimension": "price_hike", "limit": 10}}},
+                {"thought": "根据工具结果回答", "final": "检测到视频会员订阅涨价异常。"},
+            ]), "mcp-session", self.manager,
             self.root / "sessions", PROJECT_ROOT / "skills",
         )
         result = agent.run("mcp-session", "最近有没有订阅涨价异常")

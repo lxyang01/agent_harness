@@ -9,7 +9,7 @@ import urllib.request
 from http.cookiejar import CookieJar
 from pathlib import Path
 
-from billguard.agents import BillMockLLM
+from tests.llm_doubles import FinalLLM
 from billguard.auth import AuthSessionStore, Authenticator, UserStore
 from billguard.web import BusyError, BillGuardApp, make_handler
 from http.server import ThreadingHTTPServer
@@ -23,7 +23,7 @@ class HttpAuthTests(unittest.TestCase):
         users.create("admin", "admin-pass-1234", "admin")
         users.create("user1", "user-pass-123", "user")
         self.app = BillGuardApp(
-            root / "web", root / "docs", BillMockLLM(),
+            root / "web", root / "docs", FinalLLM(),
             authenticator=Authenticator(users, AuthSessionStore(root / "auth")))
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.app))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()

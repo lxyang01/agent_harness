@@ -7,11 +7,13 @@ from pathlib import Path
 
 import httpx
 
-from billguard.agents import PLANNING_AGENT_SPEC, BillMockLLM, create_planning_agent
+from billguard.agents import PLANNING_AGENT_SPEC, create_planning_agent
+from tests.llm_doubles import FinalLLM, PlanningScriptLLM
+from billguard.llm import OpenAICompatibleLLM
 from billguard.auth import User
 from billguard.bills import BillFilters, BillService
 from billguard.harness import AgentSpec, HarnessEngine
-from billguard.llm import MockLLM, OpenAICompatibleLLM
+from tests.llm_doubles import PlanningScriptLLM
 from billguard.parser import DecisionParseError, parse_decision
 from billguard.session import SessionStore
 from billguard.tools import DocumentService, TaskService, ToolError, build_planning_registry
@@ -46,7 +48,7 @@ class PlanningAgentTests(unittest.TestCase):
         self.temp.cleanup()
 
     def agent(self, session_id="project-a", llm=None):
-        return create_planning_agent(llm or MockLLM(), session_id, self.root / "state", self.docs)
+        return create_planning_agent(llm or PlanningScriptLLM(), session_id, self.root / "state", self.docs)
 
     def registry(self, session_id="project-a"):
         return build_planning_registry(session_id, self.docs, self.root / "state")
@@ -119,7 +121,7 @@ class PlanningAgentTests(unittest.TestCase):
     def test_harness_emits_structured_hook_events(self):
         events = []
         registry = self.registry()
-        engine = HarnessEngine(PLANNING_AGENT_SPEC, MockLLM(), registry,
+        engine = HarnessEngine(PLANNING_AGENT_SPEC, PlanningScriptLLM(), registry,
                                SessionStore(self.root / "hook-state"), hooks=[events.append])
         engine.run("project-a", "计算 2+2")
         event_types = [event.event_type for event in events]
@@ -302,7 +304,7 @@ TX-004,2026-09-04 12:05:00,Apple Store,购物,899.0,信用卡,疑似重复扣款
         self.assertIn("批量核查", audits[-1]["new_value"])
 
     def test_web_app_snapshot_chat_import_and_session_delete(self):
-        app = BillGuardApp(self.root / "web-state", self.docs, BillMockLLM())
+        app = BillGuardApp(self.root / "web-state", self.docs, FinalLLM())
         user = User("tester", "user")
         empty = app.snapshot(user, "web-project")
         self.assertEqual(0, empty["overview"]["count"])
@@ -312,7 +314,12 @@ TX-004,2026-09-04 12:05:00,Apple Store,购物,899.0,信用卡,疑似重复扣款
 
         imported = app.import_bills(user, {"filename": "bills.csv", "csv_text": self.bills_csv()})
         self.assertEqual(4, imported["result"]["imported_rows"])
-        result = app.chat(user, "web-project", "总结一下当前的支出情况")
+        from tests.llm_doubles import ScriptedLLM
+        scripted_app = BillGuardApp(self.root / "web-state", self.docs, ScriptedLLM([
+            {"thought": "先查总览", "tool_call": {"name": "bill_overview", "arguments": {}}},
+            {"thought": "done", "final": "当前共 4 笔支出,其中 Apple Store 2 笔。"},
+        ]))
+        result = scripted_app.chat(user, "web-project", "总结一下当前的支出情况")
         self.assertIn("4 笔支出", result["answer"])
         self.assertTrue(result["evidence"])
         queried = app.bill_query(user, {"filters": {"merchant": "Apple Store"}})

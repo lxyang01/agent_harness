@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from .agents import BillMockLLM, create_bill_agent, create_mcp_bill_agent
+from .agents import create_bill_agent, create_mcp_bill_agent
 from .auth import (AuthError, PermissionDenied, can, clear_session_cookie,
                    session_cookie)
 from .auth import AuthSessionStore, Authenticator, UserStore
@@ -856,15 +856,18 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
 
 
 def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions",
-          docs_dir: str = "docs", llm_name: str = "mock", model: str = "gpt-4.1-mini",
+          docs_dir: str = "docs", model: str = "gpt-4.1-mini",
           base_url: str = "https://api.openai.com/v1", tool_source: str = "local",
           mcp_timeout: float = 20.0, work_item_mcp_url: str = "",
           work_item_data_dir: str = ".sessions/work-items",
           llm_proxy: str | None = None, max_concurrent_llm: int = 4,
           run_timeout: float = 120.0, max_threads: int = 16,
           queue_capacity: int = 32) -> None:
-    llm = (BillMockLLM() if llm_name == "mock" else
-           OpenAICompatibleLLM(model, base_url=base_url, proxy=llm_proxy))
+    import os
+    if not (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY")):
+        print("未配置模型 API Key:请先设置环境变量 OPENROUTER_API_KEY(或 OPENAI_API_KEY)。")
+        raise SystemExit(1)
+    llm = OpenAICompatibleLLM(model, base_url=base_url, proxy=llm_proxy)
     mcp_manager: MCPClientManager | None = None
     if tool_source == "mcp":
         mcp_manager = MCPClientManager(request_timeout=mcp_timeout)
@@ -915,7 +918,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--data-dir", default=".sessions")
     parser.add_argument("--docs-dir", default="docs", help=argparse.SUPPRESS)
-    parser.add_argument("--llm", choices=("mock", "openai"), default="mock")
+
     parser.add_argument("--model", default="gpt-4.1-mini")
     parser.add_argument("--base-url", default="https://api.openai.com/v1")
     parser.add_argument("--llm-proxy", default=None,
@@ -936,7 +939,7 @@ def main() -> None:
     parser.add_argument("--queue-capacity", type=int, default=32,
                         help="请求排队容量,超出返回 503")
     args = parser.parse_args()
-    serve(args.host, args.port, args.data_dir, args.docs_dir, args.llm, args.model,
+    serve(args.host, args.port, args.data_dir, args.docs_dir, args.model,
           args.base_url, args.tool_source, args.mcp_timeout, args.work_item_mcp_url,
           args.work_item_data_dir, args.llm_proxy, args.max_concurrent_llm,
           args.run_timeout, args.max_threads, args.queue_capacity)

@@ -162,7 +162,7 @@ sample_data/           # 带剧本的合成账单(生成器在 scripts/)
 
 ## 快速开始(功能预览)
 
-安装、建号与启动的完整命令见文末「命令速查」。服务跑起来后:打开 <http://127.0.0.1:8000> 登录(admin=用户管理+全部业务,user=业务写入+审批;每个用户的数据相互隔离,各自导入自己的账单副本)。默认离线 Mock 模式,不需要 API Key。
+安装、建号、配置 API Key 与启动的完整命令见文末「命令速查」(**必须配置模型 API Key,系统只在真实模型模式下运行**)。服务跑起来后:打开 <http://127.0.0.1:8000> 登录(admin=用户管理+全部业务,user=业务写入+审批;每个用户的数据相互隔离,各自导入自己的账单副本)。
 
 **三分钟演示剧本**(导入 `sample_data/bills_demo.csv` + `subscriptions_demo.csv` 后):
 
@@ -186,7 +186,12 @@ python -m pip install -e .
 
 # 首次启动前创建管理员(交互输两次密码,至少 8 位)
 python -m billguard.users add admin --role admin
-python -m billguard.web
+
+# 配置模型 API Key(必填;支持 OpenRouter/DeepSeek 等任意 OpenAI 兼容服务)
+$env:OPENROUTER_API_KEY="你的 Key"
+
+# 启动(完整参数见下表;直连服务可省略 --llm-proxy)
+python -m billguard.web --base-url "https://openrouter.ai/api/v1" --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0.1:7897"
 ```
 
 ### 服务启动与参数
@@ -197,7 +202,6 @@ python -m billguard.web [--选项]
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
-| `--llm mock\|openai` | mock | 离线 Mock 或 OpenAI 兼容 API |
 | `--tool-source local\|mcp` | local | 本地工具或 MCP 动态发现 |
 | `--work-item-mcp-url` | 空 | 接入远程 Work Item MCP(解锁三阶段审批演示) |
 | `--max-concurrent-llm` | 4 | 模型并发上限,超限 429 |
@@ -206,11 +210,19 @@ python -m billguard.web [--选项]
 | `--data-dir` | .sessions | 数据根目录 |
 | `--llm-proxy` / `--base-url` / `--model` | — | 模型接入三件套 |
 
-### 切换真实模型(OpenRouter)
+### 更换模型服务(均为 OpenAI 兼容)
 
 ```powershell
+# OpenRouter(需代理)
 $env:OPENROUTER_API_KEY="你的 Key"
-python -m billguard.web --tool-source mcp --llm openai --base-url "https://openrouter.ai/api/v1" --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0.1:7897"
+python -m billguard.web --base-url "https://openrouter.ai/api/v1" --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0.1:7897"
+
+# DeepSeek 官方(直连,无需代理;Key 仍放 OPENROUTER_API_KEY 变量)
+$env:OPENROUTER_API_KEY="你的 DeepSeek Key"
+python -m billguard.web --base-url "https://api.deepseek.com/v1" --model "deepseek-chat"
+
+# 本地 Ollama(免费,无需 Key 与代理)
+python -m billguard.web --base-url "http://127.0.0.1:11434/v1" --model "qwen2.5:7b"
 ```
 
 不要将 API Key 写入代码或提交到 Git。
