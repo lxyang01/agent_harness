@@ -16,9 +16,9 @@ def build_app(root: Path) -> BillGuardApp:
 
 def make_users(root: Path) -> UserStore:
     users = UserStore(root / "auth")
-    users.create("alice", "alice-pass-123", "approver")
+    users.create("alice", "alice-pass-123", "user")
     users.create("admin", "admin-pass-1234", "admin")
-    users.create("mallory", "mallory-pass-12", "viewer")
+    users.create("mallory", "mallory-pass-12", "user")
     return users
 
 
@@ -27,8 +27,8 @@ class SessionOwnershipTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             app = build_app(root)
-            alice = User("alice", "approver")
-            mallory = User("mallory", "viewer")
+            alice = User("alice", "user")
+            mallory = User("mallory", "user")
             boss = User("admin", "admin")
             app.chat(alice, "s-alice", "最近 7 天的问题")
             # 私有性:他人 session 不可见、不可访问
@@ -57,7 +57,7 @@ class SessionOwnershipTests(unittest.TestCase):
             store = SessionStore(root / "web" / "billguard" / "sessions")
             store.save(store.load("legacy"))  # 无主旧文件
             boss = User("admin", "admin")
-            mallory = User("mallory", "viewer")
+            mallory = User("mallory", "user")
             app.snapshot(boss, "legacy")  # admin 可读
             with self.assertRaises(PermissionDenied):
                 app.snapshot(mallory, "legacy")
@@ -72,17 +72,17 @@ class SessionOwnershipTests(unittest.TestCase):
             app = build_app(root)
             from billguard.session import SessionStore
             store = SessionStore(root / "web" / "billguard" / "sessions")
-            app.chat(User("mallory", "viewer"), "fresh", "总结问题")
+            app.chat(User("mallory", "user"), "fresh", "总结问题")
             self.assertEqual("mallory", store.load("fresh").owner)
 
     def test_delete_session_only_by_owner(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             app = build_app(root)
-            alice = User("alice", "approver")
+            alice = User("alice", "user")
             app.chat(alice, "s1", "总结")
             with self.assertRaises(PermissionDenied):
-                app.delete_session(User("mallory", "viewer"), "s1")
+                app.delete_session(User("mallory", "user"), "s1")
             self.assertTrue(app.delete_session(alice, "s1")["deleted"])
 
 
@@ -92,7 +92,7 @@ class ServerSideIdentityTests(unittest.TestCase):
             root = Path(temp)
             app = build_app(root)
             service = BillService(root / "web" / "billguard" / "bills")
-            alice = User("alice", "approver")
+            alice = User("alice", "user")
             # 数据隔离后业务写入走按用户装配的受限视图:经应用层以 alice 身份入库
             app.import_bills(alice, {
                 "filename": "demo.csv",
@@ -157,8 +157,8 @@ class ServerSideIdentityTests(unittest.TestCase):
             gateway = PolicyGateway(ApprovalStore(root / "web" / "policy"))
             app = BillGuardApp(root / "web", root / "docs", ScriptedLLM(), FakeManager(),
                                gateway, work_items)
-            alice = User("alice", "approver")
-            mallory = User("mallory", "viewer")
+            alice = User("alice", "user")
+            mallory = User("mallory", "user")
 
             paused = app.chat(alice, "s-approve", "$monthly-guard-report create issue")
             self.assertEqual("approval_pending", paused["status"])
@@ -184,7 +184,7 @@ class WorkflowOperatorKeyTests(unittest.TestCase):
             root = Path(temp)
             app = build_app(root)
             service = BillService(root / "web" / "billguard" / "bills")
-            alice = User("alice", "approver")
+            alice = User("alice", "user")
             # 数据隔离后业务写入走按用户装配的受限视图:经应用层以 alice 身份入库
             app.import_bills(alice, {
                 "filename": "demo.csv",

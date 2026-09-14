@@ -9,7 +9,7 @@
 | **受控工具面** | 模型只能调用注册过的工具,不执行任意 SQL/Shell;参数过 Schema 硬校验,越权参数被拦截 |
 | **Skill 路由与契约** | 触发词/`$显式`路由到 4 个 Skill;白名单在模型可见面与执行面同时生效;报告缺章节、漏调工具、参数越界都会被拦截并给出纠正反馈 |
 | **三阶段审批** | 高风险写操作以 Checkpoint 持久化暂停(`prepare → 人工审批 → commit`),批准后跨进程恢复;伪造审批人被服务端身份覆盖 |
-| **登录与三角色** | HttpOnly Cookie 会话 + admin/approver/viewer 能力矩阵;`decided_by`/`operator` 一律取服务端身份 |
+| **登录与角色** | HttpOnly Cookie 会话 + admin/user 两角色能力矩阵;`decided_by`/`operator` 一律取服务端身份 |
 | **按用户数据隔离** | 本地与 MCP 工具走同一条 owner 边界;模型伪造 `owner` 参数会被注入层覆盖(对抗探针实锤验证) |
 | **并发与资源加固** | 审批乐观并发恰好一次生效;有界线程池 + 排队 503;LLM 并发上限 429;单次运行总时间预算安全停止 |
 
@@ -26,7 +26,7 @@ python -m billguard.users add admin --role admin
 python -m billguard.web
 ```
 
-打开 <http://127.0.0.1:8000> 登录。角色:admin=用户管理+全部业务,approver=业务写入+审批,viewer=只读+对话。**每个用户的数据相互隔离** —— 各自导入自己的账单副本,看板与守卫 Agent 只能看到本人数据。默认离线 Mock 模式,不需要 API Key。
+打开 <http://127.0.0.1:8000> 登录。角色:admin=用户管理+全部业务,user=业务写入+审批。**每个用户的数据相互隔离** —— 各自导入自己的账单副本,看板与守卫 Agent 只能看到本人数据。默认离线 Mock 模式,不需要 API Key。
 
 ### 三分钟演示剧本(Mock 模式)
 
@@ -120,7 +120,7 @@ Harness 还从用户原话编译**动态契约**:"最多 8 条"变成参数上�
 ### 多用户与角色
 
 - 强制登录:HttpOnly + SameSite=Strict Cookie,服务端只存 token 哈希,7 天滑动过期;空用户库拒绝启动
-- 能力矩阵服务端强制,前端仅隐藏 UI:viewer=只读+对话;approver=业务写入+审批;admin=全部+用户管理
+- 能力矩阵服务端强制:user=业务写入+审批+导出;admin=全部+用户管理
 - `decided_by`/`operator` 一律取服务端登录身份,请求体伪造无效
 - 账单数据按用户隔离,各自导入自己的副本;存量无主数据仅 admin 可见;分析 Session 同样按用户归属
 
@@ -175,7 +175,7 @@ python -m billguard.live_eval --cases "7-10,12-15" --proxy "http://127.0.0.1:789
 
 - **支出概览**:总支出/笔数/待核查/最大单笔,类别与商户分布,每日趋势,订阅清单(周期/预期/最近扣款)*—— 试试:"这个月花了多少钱"*
 - **守卫 Agent**:总结结构、比较周期、识别异常、搜交易、读脱敏样本,区分数据事实与推测;回答附带可点击的"数据依据"直达交易明细 *—— 试试:"支付类支出最近有什么变化"*
-- **交易明细**:多维筛选与分页,导出 CSV(含未脱敏备注,仅 approver/admin),人工修正类别,批量核查(≤200)留审计
+- **交易明细**:多维筛选与分页,导出 CSV(含未脱敏备注,登录用户可用),人工修正类别,批量核查(≤200)留审计
 - **类别管理**:关键词规则增删改/启停/审计;重匹配只替换规则类别,人工类别保留
 - **账单导入**:UTF-8 CSV 按交易编号去重、自动归类,记录成功/重复/失败明细
 - **守卫报告**:保存/复制/导出 Markdown/A4 打印
@@ -236,7 +236,7 @@ python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-item
 ### 用户管理 CLI
 
 ```powershell
-python -m billguard.users add <用户名> --role <admin|approver|viewer>   # 建号,--password-stdin 可从管道读密码
+python -m billguard.users add <用户名> --role <admin|user>   # 建号,--password-stdin 可从管道读密码
 python -m billguard.users list
 python -m billguard.users set-role <用户名> --role <角色>
 python -m billguard.users reset-password <用户名>

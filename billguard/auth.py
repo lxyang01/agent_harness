@@ -12,13 +12,12 @@ from pathlib import Path
 from typing import Iterator
 
 
-ROLES = ("admin", "approver", "viewer")
+ROLES = ("admin", "user")
 
 # 能力常量(账单类写操作统一为 bills_write):
 # 这是认证/角色层的内部标识,服务端与前端 JS 一致引用,从不作为文案展示给用户。
 _CAPABILITY_BY_ROLE = {
-    "viewer": frozenset(),
-    "approver": frozenset({"report_write", "bills_write", "approval_decide"}),
+    "user": frozenset({"report_write", "bills_write", "approval_decide"}),
     "admin": frozenset({"report_write", "bills_write", "approval_decide", "users_manage"}),
 }
 
@@ -82,6 +81,9 @@ class UserStore:
                 username TEXT PRIMARY KEY, password_hash TEXT NOT NULL,
                 salt TEXT NOT NULL, role TEXT NOT NULL,
                 disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)""")
+            # 角色体系简化(两角色):approver 平滑改名;viewer 停用待重分配
+            db.execute("UPDATE users SET role = 'user' WHERE role = 'approver'")
+            db.execute("UPDATE users SET disabled = 1 WHERE role = 'viewer'")
             # 密码重置需联动清理会话;即使 AuthSessionStore 尚未初始化也保证表存在
             db.execute("""CREATE TABLE IF NOT EXISTS auth_sessions (
                 token_hash TEXT PRIMARY KEY, username TEXT NOT NULL,

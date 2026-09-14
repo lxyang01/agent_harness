@@ -206,7 +206,7 @@ class WebApprovalTests(unittest.TestCase):
                 {"thought": "done", "final": "Issue created safely"},
             ])
             gateway = PolicyGateway(ApprovalStore(root / "web" / "policy"))
-            approver = User("approver", "approver")
+            approver = User("alice", "user")
             app = BillGuardApp(
                 root / "web", root / "docs", llm,
                 FakeWorkItemManager(work_items), gateway, work_items,
@@ -223,10 +223,10 @@ class WebApprovalTests(unittest.TestCase):
 
             self.assertEqual("completed", result["status"])
             self.assertEqual("executed", result["approval"]["status"])
-            self.assertEqual("approver", result["approval"]["decided_by"])
+            self.assertEqual("alice", result["approval"]["decided_by"])
             issues = work_items.list_issues()["items"]
             self.assertEqual(1, len(issues))
-            self.assertEqual("approver", issues[0]["created_by"])
+            self.assertEqual("alice", issues[0]["created_by"])
 
 
 if __name__ == "__main__":

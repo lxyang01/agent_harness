@@ -37,14 +37,14 @@ class UserValidationTests(unittest.TestCase):
 
 class CapabilityMatrixTests(unittest.TestCase):
     def test_matrix(self):
-        self.assertFalse(can("viewer", "approval_decide"))
-        self.assertFalse(can("viewer", "report_write"))
-        self.assertFalse(can("viewer", "bills_write"))
-        self.assertFalse(can("viewer", "users_manage"))
-        self.assertTrue(can("approver", "report_write"))
-        self.assertTrue(can("approver", "bills_write"))
-        self.assertTrue(can("approver", "approval_decide"))
-        self.assertFalse(can("approver", "users_manage"))
+        self.assertTrue(can("user", "approval_decide"))
+        self.assertTrue(can("user", "report_write"))
+        self.assertTrue(can("user", "bills_write"))
+        self.assertFalse(can("user", "users_manage"))
+        self.assertTrue(can("user", "report_write"))
+        self.assertTrue(can("user", "bills_write"))
+        self.assertTrue(can("user", "approval_decide"))
+        self.assertFalse(can("user", "users_manage"))
         for capability in ("report_write", "bills_write", "approval_decide", "users_manage"):
             self.assertTrue(can("admin", capability))
         self.assertFalse(can("unknown-role", "report_write"))
@@ -55,13 +55,13 @@ class UserStoreTests(unittest.TestCase):
     def test_create_verify_and_wrong_password(self):
         with tempfile.TemporaryDirectory() as temp:
             users = store(Path(temp))
-            created = users.create("alice", "alice-pass-123", "approver")
+            created = users.create("alice", "alice-pass-123", "user")
             self.assertEqual("alice", created.username)
-            self.assertEqual("approver", created.role)
+            self.assertEqual("user", created.role)
             self.assertEqual(1, users.count())
             self.assertEqual(users.get("alice"), created)
             verified = users.verify("alice", "alice-pass-123")
-            self.assertEqual("approver", verified.role)
+            self.assertEqual("user", verified.role)
             with self.assertRaises(AuthError):
                 users.verify("alice", "wrong-pass-123")
             with self.assertRaises(AuthError):
@@ -70,20 +70,20 @@ class UserStoreTests(unittest.TestCase):
     def test_duplicate_and_invalid_create(self):
         with tempfile.TemporaryDirectory() as temp:
             users = store(Path(temp))
-            users.create("alice", "alice-pass-123", "viewer")
+            users.create("alice", "alice-pass-123", "user")
             with self.assertRaises(AuthError):
-                users.create("alice", "other-pass-123", "viewer")
+                users.create("alice", "other-pass-123", "user")
             with self.assertRaises(AuthError):
-                users.create("Bob", "bob-pass-1234", "viewer")
+                users.create("Bob", "bob-pass-1234", "user")
             with self.assertRaises(AuthError):
-                users.create("bob", "short", "viewer")
+                users.create("bob", "short", "user")
             with self.assertRaises(AuthError):
                 users.create("bob", "bob-pass-1234", "boss")
 
     def test_password_hash_not_plaintext(self):
         with tempfile.TemporaryDirectory() as temp:
             users = store(Path(temp))
-            users.create("alice", "alice-pass-123", "viewer")
+            users.create("alice", "alice-pass-123", "user")
             import sqlite3
             conn = sqlite3.connect(users.db_path)
             row = conn.execute(
@@ -96,33 +96,33 @@ class UserStoreTests(unittest.TestCase):
             users = store(Path(temp))
             users.create("root", "root-pass-1234", "admin")
             users.create("alice", "alice-pass-123", "admin")
-            self.assertEqual("viewer", users.set_role("alice", "viewer").role)
+            self.assertEqual("user", users.set_role("alice", "user").role)
             with self.assertRaises(AuthError):  # 最后一个启用中的 admin 不可降级
-                users.set_role("root", "viewer")
+                users.set_role("root", "user")
             users.create("bob", "bob-pass-1234", "admin")
-            users.set_role("root", "viewer")  # 有其他 admin 时允许
+            users.set_role("root", "user")  # 有其他 admin 时允许
 
     def test_disable_guards(self):
         with tempfile.TemporaryDirectory() as temp:
             users = store(Path(temp))
             users.create("root", "root-pass-1234", "admin")
-            users.create("alice", "alice-pass-123", "viewer")
+            users.create("alice", "alice-pass-123", "user")
             self.assertTrue(users.set_disabled("alice", True).disabled)
             with self.assertRaises(AuthError):  # 最后一个启用的 admin 不可禁用
                 users.set_disabled("root", True)
             with self.assertRaises(AuthError):
                 users.verify("alice", "alice-pass-123")  # 禁用用户登录失败
             users.set_disabled("alice", False)
-            self.assertEqual("viewer", users.verify("alice", "alice-pass-123").role)
+            self.assertEqual("user", users.verify("alice", "alice-pass-123").role)
 
     def test_reset_password(self):
         with tempfile.TemporaryDirectory() as temp:
             users = store(Path(temp))
-            users.create("alice", "alice-pass-123", "viewer")
+            users.create("alice", "alice-pass-123", "user")
             users.reset_password("alice", "new-pass-12345")
             with self.assertRaises(AuthError):
                 users.verify("alice", "alice-pass-123")
-            self.assertEqual("viewer", users.verify("alice", "new-pass-12345").role)
+            self.assertEqual("user", users.verify("alice", "new-pass-12345").role)
 
 
 class FakeHeaders:
@@ -159,7 +159,7 @@ class AuthSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "auth"
             users = UserStore(root)
-            users.create("alice", "alice-pass-123", "approver")
+            users.create("alice", "alice-pass-123", "user")
             auth = Authenticator(users, AuthSessionStore(root))
             with self.assertRaises(AuthError):
                 auth.resolve_user(FakeHeaders(""))
@@ -175,7 +175,7 @@ class AuthSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "auth"
             users = UserStore(root)
-            users.create("alice", "alice-pass-123", "viewer")
+            users.create("alice", "alice-pass-123", "user")
             auth = Authenticator(users, AuthSessionStore(root))
             _, token = auth.login("alice", "alice-pass-123")
             self.assertEqual(token, session_token_from_cookie(
@@ -206,7 +206,7 @@ class PasswordResetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "auth"
             users = UserStore(root)
-            users.create("alice", "alice-pass-123", "viewer")
+            users.create("alice", "alice-pass-123", "user")
             auth = Authenticator(users, AuthSessionStore(root))
             _, token = auth.login("alice", "alice-pass-123")
             self.assertEqual("alice", auth.resolve_user(FakeHeaders(f"session={token}")).username)

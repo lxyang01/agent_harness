@@ -128,7 +128,7 @@ class SessionLockRaceTests(unittest.TestCase):
 
             app = BillGuardApp(root / "web", root / "docs", llm, manager,
                                gateway, work_items)
-            alice = User("alice", "approver")
+            alice = User("alice", "user")
 
             # 准备:第一次 chat 触发 high_write 暂停,产生 pending 审批
             paused = app.chat(alice, "s", "$monthly-guard-report create issue")
@@ -197,7 +197,7 @@ class LlmSemaphoreTests(unittest.TestCase):
             llm = _BlockingLLM()
             app = BillGuardApp(root / "web", root / "docs", llm, _BillReadManager(),
                                max_concurrent_llm=1)
-            alice = User("alice", "approver")
+            alice = User("alice", "user")
             result: dict[str, Any] = {}
 
             def run_chat() -> None:
