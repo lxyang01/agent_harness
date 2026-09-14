@@ -978,17 +978,27 @@ class BillService:
                 writer.writerow(tuple(row))
         return "\ufeff" + output.getvalue()
 
-    def purge_owner(self, owner: str) -> int:
-        """删除用户的全部业务数据(账号删除时调用);不触碰 NULL 存量行。"""
+    def purge_owner(self, owner: str, operator: str = "", note: str = "") -> dict:
+        """删除用户的全部业务数据(账号删除/自助清空时调用);不触碰 NULL 存量行。"""
         with self._connect() as db:
-            deleted = db.execute(
-                "DELETE FROM transactions WHERE owner = ?", (owner,)).rowcount
+            counts = {
+                "transactions": db.execute(
+                    "DELETE FROM transactions WHERE owner = ?", (owner,)).rowcount,
+                "subscriptions": db.execute(
+                    "DELETE FROM subscriptions WHERE owner = ?", (owner,)).rowcount,
+                "categories": db.execute(
+                    "DELETE FROM categories WHERE owner = ?", (owner,)).rowcount,
+                "reports": db.execute(
+                    "DELETE FROM reports WHERE owner = ?", (owner,)).rowcount,
+            }
             db.execute("DELETE FROM tx_audits WHERE owner = ?", (owner,))
-            db.execute("DELETE FROM categories WHERE owner = ?", (owner,))
-            db.execute("DELETE FROM subscriptions WHERE owner = ?", (owner,))
-            db.execute("DELETE FROM reports WHERE owner = ?", (owner,))
             db.execute("DELETE FROM imports WHERE owner = ?", (owner,))
-            return deleted
+            if operator:  # 清空后留一条审计标记,证明发生过自助清空
+                db.execute(
+                    "INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at, owner) "
+                    "VALUES ('__purge__', 'purge', ?, ?, ?, ?)",
+                    (operator, note[:200], _now(), owner))
+            return counts
 
     def for_user(self, owner: str) -> "_ScopedBills":
         owner = owner.strip()

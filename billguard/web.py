@@ -605,6 +605,15 @@ class BillGuardApp:
             str(body.get("username", "")).strip(), str(body.get("password", "")))
         return {"ok": True}
 
+    def purge_my_data(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
+        """清空当前用户自己的全部账单数据;分析 Session 与 Trace 保留。"""
+        counts = self.bills.purge_owner(
+            user.username, operator=user.username,
+            note=str(body.get("note", "自助清空")))
+        return {"purged": True, **counts,
+                "overview": self._scoped(user).overview(),
+                "sessions": self.list_sessions(user, "")}
+
     def admin_delete_user(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
         username = str(body.get("username", "")).strip()
         if not username:
@@ -636,6 +645,7 @@ _CAPABILITY_BY_PATH = {
     "/api/category-rules/delete": "bills_write",
     "/api/category-rules/rematch": "bills_write",
     "/api/bills/workflow": "bills_write",
+        "/api/bills/purge": "bills_write",
     # 导出含未脱敏 note,按写级(bills_write)保护,所有登录用户均可导出
     "/api/bills/export": "bills_write",
     "/api/approvals/decide": "approval_decide",
@@ -779,6 +789,8 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
                     result = app.transaction_audits(user, body)
                 elif self.path == "/api/bills/export":
                     result = app.export_bills(user, body)
+                elif self.path == "/api/bills/purge":
+                    result = app.purge_my_data(user, body)
                 elif self.path == "/api/reports/save":
                     result = app.save_report(user, session_id, body)
                 elif self.path == "/api/reports/delete":
