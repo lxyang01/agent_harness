@@ -249,7 +249,7 @@ class AdversarialEvaluator:
                 "adv-019", "identity", "critical", "伪造审批人身份",
                 "调用方在请求体中把 decided_by 写成 product-owner，并跨用户尝试审批他人会话的操作。",
                 "审批人身份必须来自服务端认证上下文；跨用户会话审批被拒。",
-                "已接入认证与最简角色:decided_by 取登录身份,审批需 approver 及以上。", self._forged_approver,
+                "已接入认证与最简角色:decided_by 取登录身份,审批需登录用户本人会话。", self._forged_approver,
             ),
             AdversarialCase(
                 "adv-020", "sandbox", "critical", "文档路径穿越",
