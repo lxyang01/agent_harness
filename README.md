@@ -243,7 +243,7 @@ python -m billguard.users reset-password <用户名>
 python -m billguard.users disable <用户名> / enable <用户名>
 ```
 
-保护约束:不能禁用自己,不能禁用/降级最后一个启用中的 admin。Web 内置等价管理面板(admin 可见)。
+保护约束:不能禁用/删除自己,不能动最后一个启用中的 admin;删除用户会级联删除其全部账单数据。Web 内置等价管理面板(admin 可见)。
 
 ## 数据与隐私
 

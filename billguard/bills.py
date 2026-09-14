@@ -978,6 +978,18 @@ class BillService:
                 writer.writerow(tuple(row))
         return "\ufeff" + output.getvalue()
 
+    def purge_owner(self, owner: str) -> int:
+        """删除用户的全部业务数据(账号删除时调用);不触碰 NULL 存量行。"""
+        with self._connect() as db:
+            deleted = db.execute(
+                "DELETE FROM transactions WHERE owner = ?", (owner,)).rowcount
+            db.execute("DELETE FROM tx_audits WHERE owner = ?", (owner,))
+            db.execute("DELETE FROM categories WHERE owner = ?", (owner,))
+            db.execute("DELETE FROM subscriptions WHERE owner = ?", (owner,))
+            db.execute("DELETE FROM reports WHERE owner = ?", (owner,))
+            db.execute("DELETE FROM imports WHERE owner = ?", (owner,))
+            return deleted
+
     def for_user(self, owner: str) -> "_ScopedBills":
         owner = owner.strip()
         if not owner:

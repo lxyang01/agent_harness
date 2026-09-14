@@ -8,6 +8,9 @@ from billguard.auth import AuthError, PermissionDenied, User, UserStore
 from billguard.bills import BillService
 from billguard.web import BillGuardApp
 
+DEMO = ("tx_id,paid_at,merchant,category,amount,method,note" + chr(10)
+        + "TX-1,2026-08-05 21:00:00,腾讯视频,订阅,25.0,微信,月费" + chr(10))
+
 
 def build_app(root: Path) -> BillGuardApp:
     from billguard.agents import BillMockLLM
@@ -203,3 +206,47 @@ class WorkflowOperatorKeyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 app.update_workflow(alice,
                                     {"tx_ids": ["TX-1"], "updates": {"status": "正常", "note": "长" * 201}})
+
+
+class UserDeleteTests(unittest.TestCase):
+    def _app(self, root: Path):
+        from billguard.agents import BillMockLLM
+        from billguard.auth import AuthSessionStore, Authenticator, UserStore
+        from billguard.web import BillGuardApp
+        users = UserStore(root / "auth")
+        users.create("boss", "boss-pass-1234", "admin")
+        users.create("alice", "alice-pass-123", "user")
+        app = BillGuardApp(root / "web", root / "docs", BillMockLLM(),
+                           authenticator=Authenticator(users, AuthSessionStore(root / "auth")))
+        return app, users
+
+    def test_delete_user_removes_account_and_data(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app, users = self._app(root)
+            boss = User("boss", "admin")
+            alice = User("alice", "user")
+            app.import_bills(alice, {"filename": "d.csv", "csv_text": DEMO})
+            self.assertEqual(1, app.snapshot(alice, "s")["overview"]["count"])
+
+            result = app.admin_delete_user(boss, {"username": "alice"})
+
+            self.assertTrue(result["deleted"])
+            with self.assertRaises(Exception):
+                users.get("alice")  # 账号已删
+            scoped = app.bills.for_user("alice")
+            self.assertEqual(0, scoped.overview()["count"])  # 数据同步清除
+            with self.assertRaises(AuthError):
+                users.verify("alice", "alice-pass-123")  # 登录随账号失效
+
+    def test_delete_guards_self_and_last_admin(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app, users = self._app(root)
+            boss = User("boss", "admin")
+            with self.assertRaises(ValueError):
+                app.admin_delete_user(boss, {"username": "boss"})  # 不能删自己
+            users.create("root2", "root2-pass-1234", "admin")
+            app.admin_delete_user(boss, {"username": "root2"})  # 有其他 admin 时可删
+            with self.assertRaises(ValueError):
+                app.admin_delete_user(boss, {"username": "boss"})  # boss 已是最后一个启用 admin

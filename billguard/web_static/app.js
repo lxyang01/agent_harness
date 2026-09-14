@@ -43,7 +43,7 @@ async function loadUsers() {
   try { const response = await fetch("/api/admin/users"); const data = await response.json().catch(() => ({}));
     if (response.status === 401) { showLogin(); return; }
     if (!response.ok) throw new Error(data.error || "加载用户失败");
-    $("#admin-rows").innerHTML = (data.users || []).map(user => `<tr><td>${escapeHtml(user.username)}</td><td>${ROLE_LABELS[user.role] || escapeHtml(user.role)}</td><td>${user.disabled ? "已禁用" : "启用"}</td><td>${escapeHtml(formatDate(user.created_at))}</td><td><div class="row-actions"><button data-user-action="role" data-username="${escapeHtml(user.username)}" data-role="${escapeHtml(user.role)}">改角色</button><button data-user-action="password" data-username="${escapeHtml(user.username)}">重置密码</button><button data-user-action="toggle" data-username="${escapeHtml(user.username)}" data-disabled="${user.disabled ? "true" : "false"}">${user.disabled ? "启用" : "禁用"}</button></div></td></tr>`).join("") || '<tr><td colspan="5" class="table-empty">暂无用户</td></tr>';
+    $("#admin-rows").innerHTML = (data.users || []).map(user => `<tr><td>${escapeHtml(user.username)}</td><td>${ROLE_LABELS[user.role] || escapeHtml(user.role)}</td><td>${user.disabled ? "已禁用" : "启用"}</td><td>${escapeHtml(formatDate(user.created_at))}</td><td><div class="row-actions"><button data-user-action="role" data-username="${escapeHtml(user.username)}" data-role="${escapeHtml(user.role)}">改角色</button><button data-user-action="password" data-username="${escapeHtml(user.username)}">重置密码</button><button data-user-action="toggle" data-username="${escapeHtml(user.username)}" data-disabled="${user.disabled ? "true" : "false"}">${user.disabled ? "启用" : "禁用"}</button><button class="danger" data-user-action="delete" data-username="${escapeHtml(user.username)}">删除</button></div></td></tr>`).join("") || '<tr><td colspan="5" class="table-empty">暂无用户</td></tr>';
   } catch (error) { toast(error.message); }
 }
 function toast(message) { const element = $("#toast"); element.textContent = message; element.classList.add("show"); setTimeout(() => element.classList.remove("show"), 2400); }
@@ -392,6 +392,11 @@ $("#admin-rows").onclick = async (event) => {
     } else if (button.dataset.userAction === "password") {
       const password = prompt(`为 ${username} 设置新密码(至少 8 位)`); if (!password) return;
       await api("/api/admin/users/password", {username, password}); toast("密码已重置");
+    } else if (button.dataset.userAction === "delete") {
+      if (!confirm(`确定永久删除用户 ${username} 吗?
+
+其账号、会话与全部账单数据(交易/订阅/类别/审计/报告)将被同步删除,此操作不可恢复。`)) return;
+      await api("/api/admin/users/delete", {username}); toast(`已删除 ${username} 及其全部数据`);
     } else {
       const disable = button.dataset.disabled !== "true";
       if (disable && !confirm(`确定禁用 ${username} 吗?禁用后其会话立即失效。`)) return;

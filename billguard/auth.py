@@ -186,6 +186,16 @@ class UserStore:
             # 密码已重置,旧凭证对应的存量会话一并失效
             db.execute("DELETE FROM auth_sessions WHERE username = ?", (username,))
 
+    def delete(self, username: str) -> None:
+        with self._connect() as db:
+            row = self._row(db, username)
+            if row is None:
+                raise AuthError(f"用户不存在:{username}")
+            if row["role"] == "admin" and not row["disabled"]                     and self._enabled_admins(db, exclude=username) == 0:
+                raise AuthError("不能删除最后一个启用中的管理员")
+            db.execute("DELETE FROM users WHERE username = ?", (username,))
+            db.execute("DELETE FROM auth_sessions WHERE username = ?", (username,))
+
     def set_disabled(self, username: str, disabled: bool) -> User:
         with self._connect() as db:
             row = self._row(db, username)

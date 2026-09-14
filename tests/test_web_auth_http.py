@@ -144,6 +144,12 @@ class HttpAuthTests(unittest.TestCase):
         status, _ = self.post("/api/admin/users/disable",
                               {"username": "newbie", "disabled": True})
         self.assertEqual(200, status)
+        # 删除用户:账号+数据级联;自我删除与最后 admin 被拒
+        status, _ = self.post("/api/admin/users/delete", {"username": "admin"})
+        self.assertEqual(400, status)
+        status, data = self.post("/api/admin/users/delete", {"username": "newbie"})
+        self.assertEqual(200, status)
+        self.assertTrue(data["deleted"])
 
 
     def test_busy_error_maps_to_429(self):
