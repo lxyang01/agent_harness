@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -183,6 +184,25 @@ def _wants_action(messages) -> bool:
     return _user_intent(messages) == "action"
 
 
+def _current_user_text(messages) -> str:
+    current = _current_turn(messages)
+    return str(current[0].get("content", "")) if current and current[0].get("role") == "user" else ""
+
+
+def _extract_subscription_target(text: str) -> str:
+    """从用户话里提取要取消的订阅名:"取消X订阅/取消X的订阅/取消订阅X" 均支持。"""
+    match = re.search(r"取消(.{0,16}?)(?:的)?(?:的订阅|订阅|会员|自动续费)", text)
+    if match and match.group(1).strip() not in ("", "订阅", "我的"):
+        return match.group(1).strip()
+    match = re.search(r"取消订阅(.{1,16}?)$", text.strip())  # 取消订阅X
+    if match:
+        return match.group(1).strip()
+    match = re.search(r"(?:把|将)?(.{1,16}?)取消(?:的)?订阅", text)  # 把X取消订阅
+    if match and match.group(1).strip():
+        return match.group(1).strip()
+    return ""
+
+
 def _last_tool(messages) -> tuple[str, dict]:
     for message in reversed(_current_turn(messages)):
         if message.get("role") == "tool":
@@ -257,8 +277,10 @@ class BillMockLLM:
                 f"已创建取消订阅工单 {issue.get('id', '')}（{issue.get('title', '')}），"
                 "由当前登录用户发起，可到 Work Item 服务追踪后续处理。"},
                 ensure_ascii=False)
+        target = _extract_subscription_target(_current_user_text(messages))
         return self._call("work-items.prepare_issue", {
-            "title": "取消腾讯视频订阅", "description": "月费由 ¥15 涨至 ¥25，经守卫报告确认后申请取消",
+            "title": f"取消{target}订阅" if target else "取消订阅",
+            "description": f"经用户确认，申请取消 {target or '该'} 订阅并停止后续扣费",
             "priority": "high"})
 
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:

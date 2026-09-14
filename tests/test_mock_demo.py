@@ -179,3 +179,29 @@ class ApprovalContextTests(unittest.TestCase):
             self.assertEqual("取消腾讯视频订阅", approval.get("action_title"))
             self.assertIn("取消", approval.get("action_description", ""))
             self.assertEqual("高", approval.get("action_priority"))
+
+
+class MockActionIntentTests(unittest.TestCase):
+    def test_cancel_intent_extracts_target_subscription(self):
+        llm = BillMockLLM()
+        decision = json.loads(llm.complete(
+            [{"role": "user", "content": "帮我取消Keep的订阅"}],
+            [{"name": "work-items.prepare_issue"}, {"name": "work-items.commit_issue"}]))
+        self.assertEqual("取消Keep订阅", decision["tool_call"]["arguments"]["title"])
+
+        decision = json.loads(llm.complete(
+            [{"role": "user", "content": "取消订阅网易云音乐"}],
+            [{"name": "work-items.prepare_issue"}]))
+        self.assertEqual("取消网易云音乐订阅", decision["tool_call"]["arguments"]["title"])
+
+        decision = json.loads(llm.complete(
+            [{"role": "user", "content": "把iCloud取消订阅"}],
+            [{"name": "work-items.prepare_issue"}]))
+        self.assertEqual("取消iCloud订阅", decision["tool_call"]["arguments"]["title"])
+
+    def test_cancel_intent_falls_back_when_no_target(self):
+        llm = BillMockLLM()
+        decision = json.loads(llm.complete(
+            [{"role": "user", "content": "帮我取消订阅"}],
+            [{"name": "work-items.prepare_issue"}]))
+        self.assertIn("订阅", decision["tool_call"]["arguments"]["title"])  # 兜底仍可建单
