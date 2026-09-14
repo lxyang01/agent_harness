@@ -103,7 +103,7 @@
         <label id="drop-zone" class="drop-zone"><input id="csv-file" type="file" accept=".csv,text/csv"><span class="upload-icon">⇧</span><strong>拖入账单 CSV 或点击选择文件</strong><small>必要字段：tx_id、paid_at、merchant、amount（可选 category、method、note）</small></label>
         <label id="subs-drop-zone" class="drop-zone subs"><input id="subs-csv-file" type="file" accept=".csv,text/csv"><span class="upload-icon">↻</span><strong>同时导入订阅 CSV（可选）</strong><small>先在此选择订阅文件，再导入账单时将一并入库：name、merchant、expected_amount（可选 cycle）</small></label>
         <div id="import-progress" class="import-progress"></div>
-        <div class="section-subheading"><h3>最近导入</h3><div><button id="download-subs-template">下载订阅模板</button><button id="download-template">下载账单模板</button></div></div>
+        <div class="section-subheading"><h3>最近导入</h3><div><button id="purge-my-data" class="danger">清空我的数据</button><button id="download-subs-template">下载订阅模板</button><button id="download-template">下载账单模板</button></div></div>
         <div class="table-card"><div class="table-scroll"><table><thead><tr><th>文件</th><th>时间</th><th>总行数</th><th>成功</th><th>重复</th><th>失败</th><th>状态</th></tr></thead><tbody id="import-rows"></tbody></table></div></div>
       </section>
 

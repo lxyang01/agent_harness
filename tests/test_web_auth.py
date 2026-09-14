@@ -250,3 +250,22 @@ class UserDeleteTests(unittest.TestCase):
             app.admin_delete_user(boss, {"username": "root2"})  # 有其他 admin 时可删
             with self.assertRaises(ValueError):
                 app.admin_delete_user(boss, {"username": "boss"})  # boss 已是最后一个启用 admin
+
+
+class PurgeMyDataTests(unittest.TestCase):
+    def test_purge_clears_own_data_but_not_others_nor_sessions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = build_app(root)
+            alice, mallory = User("alice", "user"), User("mallory", "user")
+            app.import_bills(alice, {"filename": "d.csv", "csv_text": DEMO})
+            app.import_bills(mallory, {"filename": "d.csv", "csv_text": DEMO})
+            app.chat(alice, "s-alice", "hi")  # 对话与 Session 保留
+
+            result = app.purge_my_data(alice, {})
+
+            self.assertGreaterEqual(result["transactions"], 1)
+            self.assertEqual(0, app.bills.for_user("alice").overview()["count"])
+            self.assertEqual(1, app.bills.for_user("mallory").overview()["count"])  # 他人不受影响
+            sessions = app.list_sessions(alice)
+            self.assertIn("s-alice", [item["id"] for item in sessions])  # Session 保留

@@ -361,6 +361,14 @@ $("#rematch-categories").onclick=async()=>{if(!confirm("将使用当前启用的
 $("#report-list").onclick=async(event)=>{const deleteButton=event.target.closest("[data-delete-report]");if(deleteButton){if(!confirm("确定删除这份守卫报告吗？"))return;try{const data=await api("/api/reports/delete",{report_id:Number(deleteButton.dataset.deleteReport)});state.reports=data.reports||[];renderReports();toast("报告已删除");}catch(error){toast(error.message);}return;}const action=event.target.closest("[data-report-action]");if(!action)return;const report=state.reports.find(item=>item.id===Number(action.dataset.reportId));if(!report)return;if(action.dataset.reportAction==="copy"){try{await navigator.clipboard.writeText(reportMarkdown(report));toast("报告已复制");}catch(error){toast("复制失败，请使用 Markdown 导出");}}else if(action.dataset.reportAction==="markdown"){downloadText(`${report.title}.md`,reportMarkdown(report),"text/markdown;charset=utf-8");}else if(action.dataset.reportAction==="print"){printReport(report);}};
 $("#export-bills").onclick=async()=>{try{const data=await api("/api/bills/export",{filters:currentFilters()});downloadText(data.filename,data.csv_text);toast("导出已开始");}catch(error){toast(error.message);}};
 $("#csv-file").onchange=(event)=>importFile(event.target.files[0]);const drop=$("#drop-zone");["dragenter","dragover"].forEach(name=>drop.addEventListener(name,event=>{event.preventDefault();drop.classList.add("dragging");}));["dragleave","drop"].forEach(name=>drop.addEventListener(name,event=>{event.preventDefault();drop.classList.remove("dragging");}));drop.addEventListener("drop",event=>importFile(event.dataTransfer.files[0]));
+$("#purge-my-data").onclick = async () => {
+  if (!confirm("确定清空我的全部账单数据吗?\n\n当前登录用户的交易、订阅、类别规则、导入记录与守卫报告将被永久删除(分析会话保留)。此操作不可恢复。")) return;
+  try {
+    const data = await api("/api/bills/purge", {});
+    await loadSession(state.session, true);
+    toast(`已清空:交易 ${data.transactions} 笔、订阅 ${data.subscriptions} 条、类别 ${data.categories} 项`);
+  } catch (error) { toast(error.message); }
+};
 $("#download-template").onclick=()=>downloadText("bills-template.csv","﻿tx_id,paid_at,merchant,category,amount,method,note\nTX-001,2026-09-01 08:30:00,美团外卖,餐饮,32.5,支付宝,午餐\n");
 $("#download-subs-template").onclick=()=>downloadText("subscriptions-template.csv","﻿name,merchant,cycle,expected_amount\n视频会员,某视频平台,月,25.0\n");
 $("#login-form").onsubmit = async (event) => {
