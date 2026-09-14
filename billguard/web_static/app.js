@@ -63,6 +63,28 @@ function renderSessions() {
       <button class="session-delete" data-delete-session="${escapeHtml(session.id)}" title="删除 Session">×</button>
     </div>`).join("") : '<div class="session-empty">暂无分析会话</div>';
 }
+const APPROVAL_ACTION_LABELS = {high_write:"高风险写操作",low_write:"低风险写操作",read:"只读",forbidden:"禁止"};
+const APPROVAL_ARG_LABELS = {title:"标题", description:"说明", priority:"优先级", approval_id:"工单审批号",
+  tx_ids:"交易列表", status:"状态", note:"备注", days:"天数", dimension:"维度", limit:"条数上限",
+  owner:"归属用户", operator:"操作人"};
+const APPROVAL_TOOL_LABELS = {"work-items.prepare_issue":"准备工单","work-items.commit_issue":"提交工单",
+  "work-items.list_issues":"查询工单", "bill.update_status":"更新交易核查状态"};
+function approvalSummary(item) {
+  // 人话摘要:优先取工单 title/description,其余参数逐项列出(长值截断)
+  const args = item.arguments || {};
+  const rows = [];
+  const title = args.title || "";
+  if (args.description) rows.push(["说明", args.description]);
+  if (args.priority) rows.push(["优先级", {high:"高", medium:"中", low:"低"}[args.priority] || args.priority]);
+  if (args.approval_id) rows.push(["工单审批号", args.approval_id]);
+  for (const [key, value] of Object.entries(args)) {
+    if (["title", "description", "priority", "approval_id"].includes(key)) continue;
+    const label = APPROVAL_ARG_LABELS[key] || key;
+    const text = Array.isArray(value) ? value.join("、") : String(value ?? "");
+    if (text) rows.push([label, text.length > 120 ? text.slice(0, 120) + "…" : text]);
+  }
+  return {title, rows};
+}
 function renderApprovals() {
   const items = state.approvals || [];
   const pending = items.filter(item => item.status === "pending");
@@ -72,12 +94,17 @@ function renderApprovals() {
   $("#mcp-server-list").innerHTML = state.mcpServers.length ? state.mcpServers.map(server => `<span><i></i>${escapeHtml(server.name)} · ${escapeHtml(server.transport)} · ${server.tools?.length || 0} tools</span>`).join("") : '<span class="muted">当前使用本地工具，未连接 MCP 服务</span>';
   $("#approval-list").innerHTML = items.length ? items.map(item => {
     const statusLabel = {pending:"等待审批",approved:"已批准，待执行",rejected:"已拒绝",executed:"执行成功",failed:"执行失败"}[item.status] || item.status;
-    const riskLabel = {high_write:"高风险写操作",low_write:"低风险写操作",read:"只读",forbidden:"禁止"}[item.risk_level] || item.risk_level;
+    const riskLabel = APPROVAL_ACTION_LABELS[item.risk_level] || item.risk_level;
+    const toolLabel = APPROVAL_TOOL_LABELS[item.tool_name] || item.tool_name;
+    const summary = approvalSummary(item);
+    const summaryRows = summary.rows.map(([label, value]) =>
+      `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
     return `<article class="approval-card ${item.status}">
-      <div class="approval-card-head"><div><span class="risk-pill ${item.risk_level}">${escapeHtml(riskLabel)}</span><h3>${escapeHtml(item.tool_name)}</h3></div><span class="approval-status">${escapeHtml(statusLabel)}</span></div>
+      <div class="approval-card-head"><div><span class="risk-pill ${item.risk_level}">${escapeHtml(riskLabel)}</span><h3>${escapeHtml(toolLabel)}${summary.title ? " · " + escapeHtml(summary.title) : ""}</h3></div><span class="approval-status">${escapeHtml(statusLabel)}</span></div>
       <p>${escapeHtml(item.reason || "此操作需要人工确认")}</p>
+      ${summaryRows ? `<dl class="approval-args">${summaryRows}</dl>` : ""}
       <dl><div><dt>审批 ID</dt><dd>${escapeHtml(item.id)}</dd></div><div><dt>请求时间</dt><dd>${escapeHtml(formatDate(item.requested_at))}</dd></div></dl>
-      <details><summary>查看工具参数</summary><pre>${escapeHtml(JSON.stringify(item.arguments || {}, null, 2))}</pre></details>
+      <details><summary>查看完整参数 JSON</summary><pre>${escapeHtml(JSON.stringify(item.arguments || {}, null, 2))}</pre></details>
       ${item.execution_error ? `<div class="approval-error">${escapeHtml(item.execution_error)}</div>` : ""}
       ${item.status === "pending" ? `<div class="approval-actions"><button class="reject" data-approval-decision="reject" data-approval-id="${escapeHtml(item.id)}">拒绝</button><button class="primary" data-approval-decision="approve" data-approval-id="${escapeHtml(item.id)}">批准并继续</button></div>` : `<div class="approval-audit">${item.decided_by ? `由 ${escapeHtml(item.decided_by)} 处理` : ""}${item.decided_at ? ` · ${escapeHtml(formatDate(item.decided_at))}` : ""}</div>`}
     </article>`;
@@ -300,7 +327,7 @@ function createSession() { const date=new Date(); const suggested=`billguard-${d
 async function deleteSession(id) { if(!confirm(`确定删除分析 Session “${id}”吗？\n\n对话和运行记录将永久删除，账单数据库不会受影响。`))return; try{const data=await api("/api/session/delete",{session_id:id});state.sessions=data.sessions||[];if(id===state.session)await loadSession(state.sessions[0]?.id||"default",true);else renderSessions();toast(`已删除 ${id}`);}catch(error){toast(error.message);} }
 async function send(text) {
   const message=String(text||$("#message").value).trim();if(!message||state.busy)return;showPanel("insight");state.messages.push({role:"user",content:message});renderMessages();$("#messages").insertAdjacentHTML("beforeend",'<div class="message assistant loading"><div><div class="bubble">正在查询账单数据…</div><div class="meta">BillGuard 账单守卫</div></div></div>');$("#message").value="";state.busy=true;$("#send").disabled=true;window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"});
-  try{const data=await api("/api/chat",{message});$(".loading")?.remove();state.messages.push({role:"assistant",content:data.answer,evidence:data.evidence||[]});state.sessions=data.sessions||state.sessions;state.overview=data.overview||state.overview;state.approvals=data.approvals||state.approvals;state.mcpServers=data.mcp_servers||state.mcpServers;state.runs=data.runs||state.runs;renderMessages();renderSessions();renderOverview();renderApprovals();renderRuns();if(data.status==="approval_pending"){showPanel("approvals");toast("Agent 已暂停，请检查并审批高风险操作");}else{toast(`分析完成 · ${data.steps} 步`);}}catch(error){$(".loading .bubble").textContent=`分析失败：${error.message}`;}finally{state.busy=false;$("#send").disabled=false;$("#message").focus();}
+  try{const data=await api("/api/chat",{message});$(".loading")?.remove();state.messages.push({role:"assistant",content:data.answer,evidence:data.evidence||[]});state.sessions=data.sessions||state.sessions;state.overview=data.overview||state.overview;state.approvals=data.approvals||state.approvals;state.mcpServers=data.mcp_servers||state.mcpServers;state.runs=data.runs||state.runs;renderMessages();renderSessions();renderOverview();renderApprovals();renderRuns();if(data.status==="approval_pending"){showPanel("approvals");const pausedTitle=(data.approval&&data.approval.arguments&&data.approval.arguments.title)?"："+data.approval.arguments.title:"";toast("Agent 已暂停，等待审批"+pausedTitle);}else{toast(`分析完成 · ${data.steps} 步`);}}catch(error){$(".loading .bubble").textContent=`分析失败：${error.message}`;}finally{state.busy=false;$("#send").disabled=false;$("#message").focus();}
 }
 async function saveMessageAsReport(index){const message=state.messages[index];if(!message||message.role!=="assistant")return;const defaultTitle=`账单守卫报告 · ${new Date().toLocaleDateString("zh-CN")}`;const title=prompt("报告标题",defaultTitle);if(!title?.trim())return;try{const data=await api("/api/reports/save",{title:title.trim(),content:message.content});state.reports=data.reports||[];renderReports();toast("已保存为守卫报告");}catch(error){toast(error.message);}}
 function currentFilters(){return{query:$("#filter-query").value.trim(),category:$("#filter-category").value,merchant:$("#filter-merchant").value.trim(),method:$("#filter-method").value,status:$("#filter-status").value};}
