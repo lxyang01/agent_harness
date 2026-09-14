@@ -141,13 +141,18 @@ class PlanningAgentTests(unittest.TestCase):
         result = self.agent(llm=ScriptedLLM(["not json"])).run("project-a", "hello")
         self.assertIn("模型步骤失败", result.answer)
 
-    def test_context_compression_keeps_recent_messages(self):
-        store = SessionStore(self.root / "compressed", max_messages=4, keep_recent=2)
+    def test_engine_compression_keeps_recent_messages(self):
+        # 压缩已上移至引擎层(按 AgentSpec 阈值),存储层只持久化
+        from billguard.harness.engine import HarnessEngine
         session = Session("s1", [Message("user", f"m{i}") for i in range(6)])
-        store.save(session)
+        compressed = HarnessEngine.compress_history(session, keep_recent=2)
+        self.assertEqual(["m4", "m5"], [message.content for message in compressed.messages])
+        self.assertIn("m0", compressed.summary)
+        store = SessionStore(self.root / "compressed")
+        store.save(compressed)
         loaded = store.load("s1")
-        self.assertTrue(loaded.summary)
-        self.assertEqual(["m4", "m5"], [message.content for message in loaded.messages])
+        self.assertEqual(loaded.messages, compressed.messages)  # save 不再隐藏改写
+        self.assertEqual(compressed.summary, loaded.summary)
 
     def test_trace_contains_harness_events(self):
         result = self.agent().run("project-a", "计算 2+2")
