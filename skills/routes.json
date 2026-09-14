@@ -1,43 +1,148 @@
 {
-  "default_skill": "bill-triage",
-  "routes": [
+ "default_skill": "bill-triage",
+ "routes": [
+  {
+   "skill": "bill-triage",
+   "triggers": [
+    "账单",
+    "花了多少",
+    "支出",
+    "概览",
+    "消费",
+    "分类",
+    "钱花哪儿"
+   ],
+   "allowed_tools": [
+    "bill_overview",
+    "bill_search",
+    "bill_samples",
+    "bill.aggregate",
+    "bill.query",
+    "bill.get_samples"
+   ]
+  },
+  {
+   "skill": "anomaly-investigation",
+   "priority": 10,
+   "triggers": [
+    "异常",
+    "涨价",
+    "重复扣费",
+    "盗刷",
+    "激增",
+    "多扣",
+    "可疑",
+    "对比",
+    "环比",
+    "变化"
+   ],
+   "allowed_tools": [
+    "bill_compare",
+    "bill_anomalies",
+    "bill_search",
+    "bill_samples",
+    "bill.compare_periods",
+    "bill.detect_anomalies",
+    "bill.query",
+    "bill.get_samples"
+   ],
+   "completion_rules": [
     {
-      "skill": "bill-triage",
-      "triggers": ["账单", "花了多少", "支出", "概览", "消费", "分类", "钱花哪儿"],
-      "allowed_tools": ["bill_overview", "bill_search", "bill_samples", "bill.aggregate", "bill.query", "bill.get_samples"]
-    },
-    {
-      "skill": "anomaly-investigation",
-      "priority": 10,
-      "triggers": ["异常", "涨价", "重复扣费", "盗刷", "激增", "多扣", "可疑", "对比", "环比", "变化"],
-      "allowed_tools": ["bill_compare", "bill_anomalies", "bill_search", "bill_samples", "bill.compare_periods", "bill.detect_anomalies", "bill.query", "bill.get_samples"],
-      "completion_rules": [
-        {
-          "triggers": ["样本", "明细", "哪几笔"],
-          "required_tool_groups": [["bill_samples", "bill.get_samples"]]
-        }
+     "triggers": [
+      "样本",
+      "明细",
+      "哪几笔"
+     ],
+     "required_tool_groups": [
+      [
+       "bill_samples",
+       "bill.get_samples"
       ]
-    },
-    {
-      "skill": "root-cause-analysis",
-      "triggers": ["根因", "原因", "为什么", "为何", "导致", "造成", "怎么回事"],
-      "allowed_tools": ["bill_overview", "bill_compare", "bill_anomalies", "bill_search", "bill_samples", "bill.aggregate", "bill.compare_periods", "bill.detect_anomalies", "bill.query", "bill.get_samples"]
-    },
-    {
-      "skill": "monthly-guard-report",
-      "priority": 20,
-      "triggers": ["月报", "守卫报告", "报告", "总结", "汇报", "取消订阅", "退款", "工单", "小结"],
-      "allowed_tools": ["bill_overview", "bill_compare", "bill_anomalies", "bill_search", "bill_samples", "work-items.prepare_issue", "work-items.commit_issue", "bill.aggregate", "bill.compare_periods", "bill.detect_anomalies", "bill.query", "bill.get_samples"],
-      "completion_rules": [
-        {
-          "triggers": ["报告", "月报"],
-          "required_tool_groups": [["bill_overview", "bill.aggregate"]]
-        },
-        {
-          "triggers": ["取消订阅", "取消", "退款", "工单"],
-          "required_tool_groups": [["work-items.prepare_issue", "work-items.prepare_issue"]]
-        }
-      ]
+     ]
     }
-  ]
+   ]
+  },
+  {
+   "skill": "root-cause-analysis",
+   "triggers": [
+    "根因",
+    "原因",
+    "为什么",
+    "为何",
+    "导致",
+    "造成",
+    "怎么回事"
+   ],
+   "allowed_tools": [
+    "bill_overview",
+    "bill_compare",
+    "bill_anomalies",
+    "bill_search",
+    "bill_samples",
+    "bill.aggregate",
+    "bill.compare_periods",
+    "bill.detect_anomalies",
+    "bill.query",
+    "bill.get_samples"
+   ]
+  },
+  {
+   "skill": "monthly-guard-report",
+   "priority": 20,
+   "triggers": [
+    "取消",
+    "月报",
+    "守卫报告",
+    "报告",
+    "总结",
+    "汇报",
+    "取消订阅",
+    "退款",
+    "工单",
+    "小结"
+   ],
+   "allowed_tools": [
+    "bill_overview",
+    "bill_compare",
+    "bill_anomalies",
+    "bill_search",
+    "bill_samples",
+    "work-items.prepare_issue",
+    "work-items.commit_issue",
+    "bill.aggregate",
+    "bill.compare_periods",
+    "bill.detect_anomalies",
+    "bill.query",
+    "bill.get_samples"
+   ],
+   "completion_rules": [
+    {
+     "triggers": [
+      "报告",
+      "月报"
+     ],
+     "required_tool_groups": [
+      [
+       "bill_overview",
+       "bill.aggregate"
+      ]
+     ]
+    },
+    {
+     "triggers": [
+      "取消订阅",
+      "取消",
+      "退款",
+      "工单"
+     ],
+     "required_tool_groups": [
+      [
+       "work-items.prepare_issue",
+       "work-items.prepare_issue"
+      ]
+     ]
+    }
+   ]
+  }
+ ]
 }

@@ -493,10 +493,9 @@ class HarnessEngine:
                 for alternatives in plan:
                     selected = next((tool for tool in alternatives if tool in available), None)
                     if selected is None:
-                        raise SkillError(
-                            "request requires one available tool from: "
-                            + ", ".join(alternatives)
-                        )
+                        # 组内工具对当前 Agent 全部不可用(如本地模式未接入工单服务):
+                        # 跳过该组,允许降级完成,而不是让整个请求硬失败。
+                        continue
                     resolved_plan.append(selected)
                 resolved_skills.append(replace(
                     activation,

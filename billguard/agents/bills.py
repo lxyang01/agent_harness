@@ -152,11 +152,112 @@ def create_mcp_bill_agent(llm: LLM, session_id: str, manager: MCPClientManager,
     )
 
 
+_REPORT_WORDS = ("守卫报告", "月报", "周报", "汇报")  # 强名词,与契约门禁词对齐;裸"报告/总结"走普通概览
+_ACTION_WORDS = ("取消订阅", "取消", "退款")
+
+
+def _user_intent(messages) -> str:
+    text = "|".join(str(item.get("content", "")) for item in messages
+                    if item.get("role") == "user")
+    if any(word in text for word in _ACTION_WORDS):
+        return "action"
+    if any(word in text for word in _REPORT_WORDS):
+        return "report"
+    return ""
+
+
+def _wants_report(messages) -> bool:
+    return _user_intent(messages) == "report"
+
+
+def _wants_action(messages) -> bool:
+    return _user_intent(messages) == "action"
+
+
+def _last_tool(messages) -> tuple[str, dict]:
+    for message in reversed(messages):
+        if message.get("role") == "tool":
+            name = str(message.get("name", "")).split(".")[-1]
+            try:
+                return name, json.loads(message.get("content", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                return name, {}
+    return "", {}
+
+
 class BillMockLLM:
     """Offline model double that demonstrates the bill tool loop."""
+    # ---- 报告/工单多步演示流程 ----
+
+    def _report_step(self, messages, tools) -> str:
+        name, result = _last_tool(messages)
+        if name in {"bill_overview", "aggregate"}:
+            anomaly = self._available(tools, "bill_anomalies", "bill.detect_anomalies")
+            return self._call(anomaly, {"days": 31, "dimension": "price_hike", "limit": 10})
+        if name in {"bill_anomalies", "detect_anomalies"}:
+            if result.get("dimension") != "duplicate":
+                anomaly = self._available(tools, "bill_anomalies", "bill.detect_anomalies")
+                return self._call(anomaly, {"days": 31, "dimension": "duplicate", "limit": 10})
+            return json.dumps({"thought": "汇总成四章节守卫报告", "final": self._report_final(messages)},
+                              ensure_ascii=False)
+        overview = self._available(tools, "bill_overview", "bill.aggregate")
+        return self._call(overview, {})
+
+    def _report_final(self, messages) -> str:
+        overview_text, anomaly_lines = "", []
+        for message in messages:
+            if message.get("role") != "tool":
+                continue
+            name = str(message.get("name", "")).split(".")[-1]
+            try:
+                result = json.loads(message.get("content", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if name in {"bill_overview", "aggregate"}:
+                overview_text = (f"共 {result.get('count', 0)} 笔支出，合计 ¥{result.get('total_amount', 0):g}，"
+                                 f"待核查 {result.get('pending', 0)} 笔。")
+            elif name in {"bill_anomalies", "detect_anomalies"} and result.get("items"):
+                anomaly_lines.extend(f"- {item['name']}：{item['detail']}" for item in result["items"])
+        nl = chr(10)
+        sections = [
+            "支出事实：" + (overview_text or "本期无支出记录。"),
+            "异常清单：" + nl + (nl.join(anomaly_lines[:8]) if anomaly_lines else "- 本期未检出异常。"),
+            "根因推测：以上异常来自工具结果中的确定性阈值判定；涨价类需对照订阅预期金额，"
+            "重复类需确认是否为同一服务的两次扣费，目前仅有统计证据，尚未确认根因。",
+            "行动计划：" + nl
+            + "1. 逐条核对异常清单中的订阅商户与账单原文；" + nl
+            + "2. 对确认涨价或重复的服务发起取消订阅/退款工单（将走三阶段人工审批）；" + nl
+            + "3. 下月复查同类异常是否复现。",
+        ]
+        return (nl + nl).join(sections)
+
+    def _action_step(self, messages, tools) -> str:
+        available = {str(tool.get("name", "")) for tool in tools}
+        if "work-items.prepare_issue" not in available:
+            return json.dumps({"thought": "缺少工单服务", "final":
+                "取消订阅/退款需要工单服务配合：请以 --tool-source mcp 启动并接入 "
+                "Work Item MCP 后重试，届时会走 prepare → 人工审批 → commit 三阶段协议。"},
+                ensure_ascii=False)
+        name, result = _last_tool(messages)
+        if name == "prepare_issue":
+            return self._call("work-items.commit_issue",
+                              {"approval_id": result.get("approval_id", "")})
+        if name == "commit_issue":
+            issue = result.get("created", {})
+            return json.dumps({"thought": "工单已落库", "final":
+                f"已创建取消订阅工单 {issue.get('id', '')}（{issue.get('title', '')}），"
+                "由当前登录用户发起，可到 Work Item 服务追踪后续处理。"},
+                ensure_ascii=False)
+        return self._call("work-items.prepare_issue", {
+            "title": "取消腾讯视频订阅", "description": "月费由 ¥15 涨至 ¥25，经守卫报告确认后申请取消",
+            "priority": "high"})
 
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:
         last = messages[-1]
+        if _wants_report(messages):
+            return self._report_step(messages, tools)
+        if _wants_action(messages):
+            return self._action_step(messages, tools)
         if last["role"] == "tool":
             result = json.loads(last["content"])
             name = str(last.get("name", "")).split(".")[-1]
@@ -192,6 +293,10 @@ class BillMockLLM:
             return json.dumps({"thought": "根据真实工具结果回答", "final": answer}, ensure_ascii=False)
 
         text = str(last.get("content", ""))
+        if any(word in text for word in _REPORT_WORDS):
+            return self._report_step(messages, tools)
+        if any(word in text for word in ("取消订阅", "取消", "退款")):
+            return self._action_step(messages, tools)
         if any(word in text for word in ("异常", "涨价", "重复", "盗刷")):
             # 演示故事线在 8 月上旬,窗口需覆盖到数据最大日 2026-08-31 往前 31 天
             dimension = "duplicate" if "重复" in text else "price_hike"
