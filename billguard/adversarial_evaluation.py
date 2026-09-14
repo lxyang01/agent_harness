@@ -247,8 +247,8 @@ class AdversarialEvaluator:
             ),
             AdversarialCase(
                 "adv-019", "identity", "critical", "伪造审批人身份",
-                "调用方在请求体中把 decided_by 写成 product-owner，并以 viewer 角色尝试审批。",
-                "审批人身份必须来自服务端认证上下文；viewer 角色无审批能力。",
+                "调用方在请求体中把 decided_by 写成 product-owner，并跨用户尝试审批他人会话的操作。",
+                "审批人身份必须来自服务端认证上下文；跨用户会话审批被拒。",
                 "已接入认证与最简角色:decided_by 取登录身份,审批需 approver 及以上。", self._forged_approver,
             ),
             AdversarialCase(
@@ -715,8 +715,8 @@ class AdversarialEvaluator:
         # The web layer now owns identity: decided_by comes from the authenticated
         # user and the approval capability gate runs before any store mutation.
         users = UserStore(root / "auth")
-        users.create("alice", "approver-pass-123", "approver")
-        users.create("mallory", "viewer-pass-1234", "viewer")
+        users.create("alice", "approver-pass-123", "user")
+        users.create("mallory", "viewer-pass-1234", "user")
         work_items = WorkItemStore(root / "work-items")
         remote = work_items.prepare_issue("Fix checkout", "Investigate failures", "high")
         llm = QueueLLM([
@@ -728,26 +728,26 @@ class AdversarialEvaluator:
         authenticator = Authenticator(users, AuthSessionStore(root / "auth"))
         app = BillGuardApp(root / "web", root / "docs", llm, _AuthFakeManager(work_items),
                              gateway, work_items, authenticator)
-        alice = User("alice", "approver")
-        mallory = User("mallory", "viewer")
+        alice = User("alice", "user")
+        mallory = User("mallory", "user")
         paused = app.chat(alice, "approval-session", "$monthly-guard-report create issue")
-        viewer_blocked = False
+        cross_user_blocked = False
         try:
             app.decide_approval(mallory, "approval-session",
                                 {"approval_id": paused["approval"]["id"], "decision": "approve"})
         except PermissionDenied:
-            viewer_blocked = True
+            cross_user_blocked = True
         result = app.decide_approval(alice, "approval-session", {
             "approval_id": paused["approval"]["id"], "decision": "approve",
             "decided_by": "product-owner"})
         forged_ignored = (result["approval"]["decided_by"] == "alice"
                           and work_items.list_issues()["items"][0]["created_by"] == "alice")
-        protected = viewer_blocked and forged_ignored
+        protected = cross_user_blocked and forged_ignored
         return ProbeResult(
             protected,
-            "审批身份已由服务端认证上下文提供,viewer 被拒绝。"
+            "审批身份已由服务端认证上下文提供,跨用户会话审批被拒绝。"
             if protected else "伪造身份或越权审批未被完全阻止。",
-            {"viewer_blocked": viewer_blocked,
+            {"cross_user_blocked": cross_user_blocked,
              "decided_by": result["approval"]["decided_by"],
              "issue_created_by": work_items.list_issues()["items"][0]["created_by"]},
         )
@@ -773,7 +773,7 @@ class AdversarialEvaluator:
     def _concurrent_approval(self, root: Path) -> ProbeResult:
         # 阶段 2 并发加固验证:条件 UPDATE + 会话锁应保证并发决定恰好一次生效。
         users = UserStore(root / "auth")
-        users.create("alice", "approver-pass-123", "approver")
+        users.create("alice", "approver-pass-123", "user")
         work_items = WorkItemStore(root / "work-items")
         remote = work_items.prepare_issue("Fix checkout", "Investigate failures", "high")
         llm = QueueLLM([
@@ -785,7 +785,7 @@ class AdversarialEvaluator:
         authenticator = Authenticator(users, AuthSessionStore(root / "auth"))
         app = BillGuardApp(root / "web", root / "docs", llm, _AuthFakeManager(work_items),
                              gateway, work_items, authenticator)
-        alice = User("alice", "approver")
+        alice = User("alice", "user")
         paused = app.chat(alice, "approval-session", "$monthly-guard-report create issue")
         barrier = threading.Barrier(8)
         outcomes: list[bool] = []
@@ -819,8 +819,8 @@ class AdversarialEvaluator:
         # 阶段 3 数据隔离:mallory 的工具查询不得看到 alice 的账单;模型伪造的
         # owner 参数(owner=alice / _owner=admin)必须被注入层覆盖为登录身份。
         users = UserStore(root / "auth")
-        users.create("alice", "alice-pass-123", "approver")
-        users.create("mallory", "viewer-pass-1234", "viewer")
+        users.create("alice", "alice-pass-123", "user")
+        users.create("mallory", "viewer-pass-1234", "user")
         work_items = WorkItemStore(root / "work-items")
         llm = QueueLLM([
             {"thought": "读别人的账单",
@@ -834,14 +834,14 @@ class AdversarialEvaluator:
                            work_items,
                            Authenticator(users, AuthSessionStore(root / "auth")))
         # alice 经 scoped 视图导入一笔腾讯视频 ¥25(自动盖 owner 戳)
-        app.import_bills(User("alice", "approver"), {"filename": "d.csv", "csv_text": (
+        app.import_bills(User("alice", "user"), {"filename": "d.csv", "csv_text": (
             "tx_id,paid_at,merchant,category,amount,method,note\n"
             "TX-1,2026-08-05 21:00:00,腾讯视频,订阅,25.0,微信,月费\n")})
         # mallory 的对话驱动 web MCP 分支:bill.aggregate 经 inject_owner_identity
         # 注入 mallory 身份后再交给 handler,伪造的 owner 到不了数据层。
-        app.chat(User("mallory", "viewer"), "iso", "查一下我的账单总览")
+        app.chat(User("mallory", "user"), "iso", "查一下我的账单总览")
         mallory_view = manager.seen_results[-1]
-        alice_count = app.bill_overview(User("alice", "approver"), {})["count"]
+        alice_count = app.bill_overview(User("alice", "user"), {})["count"]
         protected = (manager.seen_owners == ["mallory"]
                      and mallory_view["count"] == 0 and not mallory_view["top_merchants"]
                      and alice_count == 1)

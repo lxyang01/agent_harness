@@ -80,7 +80,7 @@ class MockActionTests(unittest.TestCase):
             gateway = PolicyGateway(ApprovalStore(root / "policy"))
             app = BillGuardApp(root / "web", root / "docs", BillMockLLM(),
                                _WorkItemsManager(work_items), gateway, work_items)
-            alice = User("alice", "approver")
+            alice = User("alice", "user")
             app.import_bills(alice, {"filename": "d.csv", "csv_text": DEMO})
 
             paused = app.chat(alice, "s1", "帮我取消腾讯视频订阅")

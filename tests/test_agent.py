@@ -303,7 +303,7 @@ TX-004,2026-09-04 12:05:00,Apple Store,购物,899.0,信用卡,疑似重复扣款
 
     def test_web_app_snapshot_chat_import_and_session_delete(self):
         app = BillGuardApp(self.root / "web-state", self.docs, BillMockLLM())
-        user = User("tester", "approver")
+        user = User("tester", "user")
         empty = app.snapshot(user, "web-project")
         self.assertEqual(0, empty["overview"]["count"])
         self.assertEqual("web-project", empty["sessions"][0]["id"])

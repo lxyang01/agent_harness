@@ -19,8 +19,8 @@ async function api(path, body = {}) {
   if (!response.ok) throw new Error(data.error || "请求失败");
   return data;
 }
-const ROLE_CAPS = {viewer:[], approver:["report_write","bills_write","approval_decide"], admin:["report_write","bills_write","approval_decide","users_manage"]};
-const ROLE_LABELS = {admin:"管理员", approver:"审批人", viewer:"观察者"};
+const ROLE_CAPS = {user:["report_write","bills_write","approval_decide"], admin:["report_write","bills_write","approval_decide","users_manage"]};
+const ROLE_LABELS = {admin:"管理员", user:"用户"};
 const hasCap = (capability) => state.userCaps.has(capability);
 function showLogin() { $("#login-overlay").hidden = false; $("#login-username").focus(); }
 function hideLogin() { $("#login-overlay").hidden = true; }
@@ -33,7 +33,6 @@ function applyUser(user) {
   $("#user-name").textContent = user.username;
   $("#user-role").textContent = ROLE_LABELS[user.role] || user.role;
   $("#admin-nav").hidden = !hasCap("users_manage");
-  document.body.classList.toggle("viewer-mode", user.role === "viewer");
 }
 async function initAuth() {
   try { const response = await fetch("/api/auth/me"); if (response.ok) { applyUser(await response.json()); await loadSession(state.session, true); return; } } catch (error) {}
@@ -375,11 +374,11 @@ $("#login-form").onsubmit = async (event) => {
     await loadSession(state.session, true);
   } catch (err) { error.textContent = "网络错误,请重试"; error.hidden = false; }
 };
-$("#logout").onclick = async () => { try { await fetch("/api/auth/logout", {method:"POST"}); } catch (error) {} state.user = null; state.userCaps = new Set(); $("#user-badge").hidden = true; $("#logout").hidden = true; document.body.classList.remove("viewer-mode"); showPanel("overview"); $("#admin-rows").innerHTML = ""; showLogin(); };
+$("#logout").onclick = async () => { try { await fetch("/api/auth/logout", {method:"POST"}); } catch (error) {} state.user = null; state.userCaps = new Set(); $("#user-badge").hidden = true; $("#logout").hidden = true; showPanel("overview"); $("#admin-rows").innerHTML = ""; showLogin(); };
 $("#admin-create").onclick = async () => {
   const username = prompt("新用户用户名(2-32 位小写字母/数字,可用 - _)"); if (!username?.trim()) return;
   const password = prompt(`为 ${username.trim()} 设置密码(至少 8 位)`); if (!password) return;
-  const role = prompt("角色:admin / approver / viewer", "viewer"); if (!["admin","approver","viewer"].includes(role || "")) { toast("角色无效"); return; }
+  const role = prompt("角色:admin / user", "user"); if (!["admin","user"].includes(role || "")) { toast("角色无效"); return; }
   try { await api("/api/admin/users", {username: username.trim(), password, role}); toast("用户已创建"); await loadUsers(); } catch (error) { toast(error.message); }
 };
 $("#admin-rows").onclick = async (event) => {
@@ -387,8 +386,8 @@ $("#admin-rows").onclick = async (event) => {
   const username = button.dataset.username;
   try {
     if (button.dataset.userAction === "role") {
-      const role = prompt(`将 ${username} 的角色改为(admin/approver/viewer)`, button.dataset.role);
-      if (!["admin","approver","viewer"].includes(role || "")) return;
+      const role = prompt(`将 ${username} 的角色改为(admin/user)`, button.dataset.role);
+      if (!["admin","user"].includes(role || "")) return;
       await api("/api/admin/users/role", {username, role}); toast("角色已更新");
     } else if (button.dataset.userAction === "password") {
       const password = prompt(`为 ${username} 设置新密码(至少 8 位)`); if (!password) return;

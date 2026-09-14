@@ -152,7 +152,7 @@ class WebScopedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             app = BillGuardApp(root / "sessions", root / "docs", BillMockLLM())
-            alice, bob = User("alice", "approver"), User("bob", "viewer")
+            alice, bob = User("alice", "user"), User("bob", "user")
             app.import_bills(alice, {"filename": "d.csv", "csv_text": DEMO})
             self.assertEqual(0, app.snapshot(bob, "s1")["overview"]["count"])
             self.assertEqual(1, app.snapshot(alice, "s1")["overview"]["count"])
@@ -164,7 +164,7 @@ class WebScopedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             app = BillGuardApp(root / "sessions", root / "docs", BillMockLLM())
-            alice, bob = User("alice", "approver"), User("bob", "viewer")
+            alice, bob = User("alice", "user"), User("bob", "user")
             app.import_bills(alice, {"filename": "a.csv", "csv_text": DEMO})
             app.import_bills(bob, {"filename": "b.csv", "csv_text": DEMO_BOB})
             # 本地模式 registry 按 bob 装配:bill_overview 只见 bob 自己的行
@@ -303,7 +303,7 @@ class OwnerInjectionTests(unittest.TestCase):
         from billguard.web import BillGuardApp
         app = BillGuardApp(Path(self.temp.name) / "web", Path(self.temp.name) / "docs",
                            BillMockLLM(), self.manager)
-        agent = app._agent(User("alice", "viewer"), "s-inject")
+        agent = app._agent(User("alice", "user"), "s-inject")
         result = agent.tools.execute("bill.aggregate", {"owner": "mallory"})
         self.assertEqual(["alice"], self.manager.seen_owners)
         self.assertEqual(1, result["count"])

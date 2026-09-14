@@ -21,8 +21,7 @@ class HttpAuthTests(unittest.TestCase):
         root = Path(self._temp.name)
         users = UserStore(root / "auth")
         users.create("admin", "admin-pass-1234", "admin")
-        users.create("approver1", "approver-pass-1", "approver")
-        users.create("viewer1", "viewer-pass-12", "viewer")
+        users.create("user1", "user-pass-123", "user")
         self.app = BillGuardApp(
             root / "web", root / "docs", BillMockLLM(),
             authenticator=Authenticator(users, AuthSessionStore(root / "auth")))
@@ -55,9 +54,12 @@ class HttpAuthTests(unittest.TestCase):
             return exc.code, json.loads(exc.read().decode("utf-8"))
 
     def test_unauthenticated_api_returns_401(self):
-        for path in ("/api/snapshot", "/api/chat"):
+        bodies = {"/api/chat": {"message": "hi"},
+                  "/api/approvals/decide": {"approval_id": "POL-X", "decision": "approve"},
+                  "/api/bills/import": {"filename": "f.csv", "csv_text": "x"}}
+        for path in ("/api/snapshot", "/api/chat", "/api/approvals/decide", "/api/bills/import"):
             with self.subTest(path=path):
-                status, _ = self.post(path, {"message": "hi"} if path == "/api/chat" else {})
+                status, _ = self.post(path, bodies.get(path, {}))
                 self.assertEqual(401, status)
 
     def test_login_sets_cookie_and_grants_access(self):
@@ -75,28 +77,32 @@ class HttpAuthTests(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertEqual("admin", data["username"])
 
-    def test_viewer_capabilities_blocked(self):
-        self.post("/api/auth/login", {"username": "viewer1", "password": "viewer-pass-12"})
+    def test_user_capabilities_and_admin_gate(self):
+        self.post("/api/auth/login", {"username": "user1", "password": "user-pass-123"})
+        # user 拥有全部业务能力(报告写入/导出/导入/对话)
         for path, body in (
             ("/api/reports/save", {"title": "t", "content": "c"}),
-            ("/api/bills/import", {"filename": "f.csv", "csv_text": "x"}),
-            ("/api/bills/categories", {"tx_id": "TX-1", "category": "餐饮"}),
-            ("/api/bills/workflow", {"tx_ids": ["TX-1"], "updates": {"status": "待核查"}}),
-            # 导出含未脱敏 note,按写级(bills_write)保护,viewer 拒绝
             ("/api/bills/export", {"filters": {}}),
-            ("/api/approvals/decide", {"approval_id": "POL-X", "decision": "approve"}),
-            ("/api/admin/users", {"username": "u", "password": "12345678", "role": "viewer"}),
         ):
             with self.subTest(path=path):
-                status, data = self.post(path, body)
-                self.assertEqual(403, status)
+                status, _ = self.post(path, body)
+                self.assertEqual(200, status)
+        nl = chr(10)
+        csv_text = ("tx_id,paid_at,merchant,category,amount,method,note" + nl
+                    + "TX-1,2026-08-05 10:00:00,测试商户,餐饮,10.0,微信," + nl)
+        status, _ = self.post("/api/bills/import", {"filename": "f.csv", "csv_text": csv_text})
+        self.assertEqual(200, status)
+        status, _ = self.post("/api/chat", {"message": "最近 7 天的问题"})
+        self.assertEqual(200, status)
+        # 用户管理仍为 admin 专属
+        status, _ = self.post("/api/admin/users",
+                              {"username": "u", "password": "12345678", "role": "user"})
+        self.assertEqual(403, status)
         status, _ = self.get("/api/admin/users")
         self.assertEqual(403, status)
-        status, _ = self.post("/api/chat", {"message": "最近 7 天的问题"})
-        self.assertEqual(200, status)  # viewer 可以对话
 
     def test_export_bills_allowed_for_writer_roles(self):
-        self.post("/api/auth/login", {"username": "approver1", "password": "approver-pass-1"})
+        self.post("/api/auth/login", {"username": "user1", "password": "user-pass-123"})
         status, data = self.post("/api/bills/export", {"filters": {}})
         self.assertEqual(200, status)
         self.assertEqual("bills-export.csv", data["filename"])
@@ -121,13 +127,13 @@ class HttpAuthTests(unittest.TestCase):
     def test_admin_user_management_endpoints(self):
         self.post("/api/auth/login", {"username": "admin", "password": "admin-pass-1234"})
         status, data = self.post("/api/admin/users",
-                                 {"username": "newbie", "password": "12345678", "role": "viewer"})
+                                 {"username": "newbie", "password": "12345678", "role": "user"})
         self.assertEqual(200, status)
         status, data = self.get("/api/admin/users")
         usernames = [item["username"] for item in data["users"]]
         self.assertIn("newbie", usernames)
         self.assertNotIn("password_hash", data["users"][0])  # 不泄露哈希
-        status, _ = self.post("/api/admin/users/role", {"username": "newbie", "role": "approver"})
+        status, _ = self.post("/api/admin/users/role", {"username": "newbie", "role": "user"})
         self.assertEqual(200, status)
         status, _ = self.post("/api/admin/users/password",
                               {"username": "newbie", "password": "abcd12345"})
