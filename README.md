@@ -13,113 +13,6 @@
 | **按用户数据隔离** | 本地与 MCP 工具走同一条 owner 边界;模型伪造 `owner` 参数会被注入层覆盖(对抗探针实锤验证) |
 | **并发与资源加固** | 审批乐观并发恰好一次生效;有界线程池 + 排队 503;LLM 并发上限 429;单次运行总时间预算安全停止 |
 
-## 快速开始
-
-```powershell
-cd D:\shixi\aicoding\feedback-agent-runtime
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e .
-
-# 首次启动前创建管理员(交互输两次密码,至少 8 位)
-python -m billguard.users add admin --role admin
-python -m billguard.web
-```
-
-打开 <http://127.0.0.1:8000> 登录。角色:admin=用户管理+全部业务,user=业务写入+审批。**每个用户的数据相互隔离** —— 各自导入自己的账单副本,看板与守卫 Agent 只能看到本人数据。默认离线 Mock 模式,不需要 API Key。
-
-**三分钟演示剧本**(导入 `sample_data/bills_demo.csv` + `subscriptions_demo.csv` 后):
-
-1. 问守卫 Agent:**"最近有什么异常扣费"** → 检出腾讯视频涨价(预期 ¥15/月,8 月实扣 ¥25)
-2. 问:**"有没有重复扣费"** → 检出百度网盘同日 5 分钟内两笔 ¥18
-3. 问:**"生成本月守卫报告"** → 四章节报告(支出事实/异常清单/根因推测/行动计划)
-4. 问:**"帮我取消腾讯视频订阅"** → 接入 Work Item MCP 后走完整三阶段审批(见命令速查)
-5. 演示完想重来?导入面板右下角"**清空我的数据**" → 重新导入
-
-## 命令速查
-
-**所有可用命令集中在本节。**
-
-### 服务启动与参数
-
-```powershell
-python -m billguard.web [--选项]
-```
-
-| 参数 | 默认 | 说明 |
-| --- | --- | --- |
-| `--llm mock\|openai` | mock | 离线 Mock 或 OpenAI 兼容 API |
-| `--tool-source local\|mcp` | local | 本地工具或 MCP 动态发现 |
-| `--work-item-mcp-url` | 空 | 接入远程 Work Item MCP(解锁三阶段审批演示) |
-| `--max-concurrent-llm` | 4 | 模型并发上限,超限 429 |
-| `--max-threads` / `--queue-capacity` | 16 / 32 | HTTP 线程池与排队容量,满载 503 |
-| `--run-timeout` | 120s | 单次 Agent 运行总预算,超限安全停止 |
-| `--data-dir` | .sessions | 数据根目录 |
-| `--llm-proxy` / `--base-url` / `--model` | — | 模型接入三件套 |
-
-### 切换真实模型(OpenRouter)
-
-```powershell
-$env:OPENROUTER_API_KEY="你的 Key"
-python -m billguard.web --tool-source mcp --llm openai --base-url "https://openrouter.ai/api/v1" --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0.1:7897"
-```
-
-不要将 API Key 写入代码或提交到 Git。
-
-### 远程 Work Item MCP(解锁三阶段审批演示)
-
-```powershell
-# 窗口一:启动 Work Item MCP
-python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" serve --transport streamable-http --host 127.0.0.1 --port 8020
-# 窗口二:Web 接入
-python -m billguard.web --tool-source mcp --work-item-mcp-url "http://127.0.0.1:8020/mcp"
-```
-
-```powershell
-# 工单管理(带外审批也可走 Web 审批中心)
-python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" pending
-python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" approve "APR-XXXXXXXXXX" --by "product-owner"
-python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" reject "APR-XXXXXXXXXX" --by "product-owner"
-```
-
-### 用户管理 CLI
-
-```powershell
-python -m billguard.users add <用户名> --role <admin|user>   # 建号,--password-stdin 可从管道读密码
-python -m billguard.users list
-python -m billguard.users set-role <用户名> --role <角色>
-python -m billguard.users reset-password <用户名>
-python -m billguard.users disable <用户名> / enable <用户名>
-```
-
-保护约束:不能禁用/删除自己,不能动最后一个启用中的 admin;删除用户会级联删除其全部账单数据。
-
-### 评测命令
-
-```powershell
-# 对抗评测(确定性,零费用)—— 22 条攻击探针
-python -m billguard.adversarial_eval
-
-# 路由评测(确定性,零费用)—— 50 条用例三组消融
-python -m billguard.eval --variant compare
-
-# 真实模型端到端评测(产生 API 费用)
-$env:OPENROUTER_API_KEY="你的 Key"
-python -m billguard.live_eval --limit 3 --proxy "http://127.0.0.1:7897" --confirm-live   # 冒烟
-python -m billguard.live_eval --repeats 3 --proxy "http://127.0.0.1:7897" --confirm-live # 稳定性(15×3)
-python -m billguard.live_eval --cases "7-10,12-15" --proxy "http://127.0.0.1:7897" --confirm-live  # 只回归指定用例
-```
-
-没有 `--confirm-live` 时只显示计划、不发起 API 调用。
-
-### 测试
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
-当前 **160 项**:并发竞态专项、身份与隔离、运行时加固、离线演示回归。
-
 ## 功能说明
 
 ### 工作台
@@ -266,4 +159,113 @@ sample_data/           # 带剧本的合成账单(生成器在 scripts/)
 ### 当前边界
 
 - 企业级 SSO(OIDC/LDAP)尚未接入(单点身份解析锚点已预留);类别归类为关键词规则;脱敏为规则级,不替代企业级 DLP;PDF 依赖浏览器打印
-- 设计文档保留在本地 `docs/` 目录,未随仓库分发
+
+## 快速开始(功能预览)
+
+安装、建号与启动的完整命令见文末「命令速查」。服务跑起来后:打开 <http://127.0.0.1:8000> 登录(admin=用户管理+全部业务,user=业务写入+审批;每个用户的数据相互隔离,各自导入自己的账单副本)。默认离线 Mock 模式,不需要 API Key。
+
+**三分钟演示剧本**(导入 `sample_data/bills_demo.csv` + `subscriptions_demo.csv` 后):
+
+1. 问守卫 Agent:**"最近有什么异常扣费"** → 检出腾讯视频涨价(预期 ¥15/月,8 月实扣 ¥25)
+2. 问:**"有没有重复扣费"** → 检出百度网盘同日 5 分钟内两笔 ¥18
+3. 问:**"生成本月守卫报告"** → 四章节报告(支出事实/异常清单/根因推测/行动计划)
+4. 问:**"帮我取消腾讯视频订阅"** → 接入 Work Item MCP 后走完整三阶段审批(见命令速查)
+5. 演示完想重来?导入面板右下角"**清空我的数据**" → 重新导入
+
+## 命令速查
+
+**所有可用命令集中在本节。**
+
+### 安装与首次启动
+
+```powershell
+# 在项目根目录执行
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
+
+# 首次启动前创建管理员(交互输两次密码,至少 8 位)
+python -m billguard.users add admin --role admin
+python -m billguard.web
+```
+
+### 服务启动与参数
+
+```powershell
+python -m billguard.web [--选项]
+```
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--llm mock\|openai` | mock | 离线 Mock 或 OpenAI 兼容 API |
+| `--tool-source local\|mcp` | local | 本地工具或 MCP 动态发现 |
+| `--work-item-mcp-url` | 空 | 接入远程 Work Item MCP(解锁三阶段审批演示) |
+| `--max-concurrent-llm` | 4 | 模型并发上限,超限 429 |
+| `--max-threads` / `--queue-capacity` | 16 / 32 | HTTP 线程池与排队容量,满载 503 |
+| `--run-timeout` | 120s | 单次 Agent 运行总预算,超限安全停止 |
+| `--data-dir` | .sessions | 数据根目录 |
+| `--llm-proxy` / `--base-url` / `--model` | — | 模型接入三件套 |
+
+### 切换真实模型(OpenRouter)
+
+```powershell
+$env:OPENROUTER_API_KEY="你的 Key"
+python -m billguard.web --tool-source mcp --llm openai --base-url "https://openrouter.ai/api/v1" --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0.1:7897"
+```
+
+不要将 API Key 写入代码或提交到 Git。
+
+### 远程 Work Item MCP(解锁三阶段审批演示)
+
+```powershell
+# 窗口一:启动 Work Item MCP
+python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" serve --transport streamable-http --host 127.0.0.1 --port 8020
+# 窗口二:Web 接入
+python -m billguard.web --tool-source mcp --work-item-mcp-url "http://127.0.0.1:8020/mcp"
+```
+
+```powershell
+# 工单管理(带外审批也可走 Web 审批中心)
+python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" pending
+python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" approve "APR-XXXXXXXXXX" --by "product-owner"
+python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" reject "APR-XXXXXXXXXX" --by "product-owner"
+```
+
+### 用户管理 CLI
+
+```powershell
+python -m billguard.users add <用户名> --role <admin|user>   # 建号,--password-stdin 可从管道读密码
+python -m billguard.users list
+python -m billguard.users set-role <用户名> --role <角色>
+python -m billguard.users reset-password <用户名>
+python -m billguard.users disable <用户名> / enable <用户名>
+```
+
+保护约束:不能禁用/删除自己,不能动最后一个启用中的 admin;删除用户会级联删除其全部账单数据。
+
+### 评测命令
+
+```powershell
+# 对抗评测(确定性,零费用)—— 22 条攻击探针
+python -m billguard.adversarial_eval
+
+# 路由评测(确定性,零费用)—— 50 条用例三组消融
+python -m billguard.eval --variant compare
+
+# 真实模型端到端评测(产生 API 费用)
+$env:OPENROUTER_API_KEY="你的 Key"
+python -m billguard.live_eval --limit 3 --proxy "http://127.0.0.1:7897" --confirm-live   # 冒烟
+python -m billguard.live_eval --repeats 3 --proxy "http://127.0.0.1:7897" --confirm-live # 稳定性(15×3)
+python -m billguard.live_eval --cases "7-10,12-15" --proxy "http://127.0.0.1:7897" --confirm-live  # 只回归指定用例
+```
+
+没有 `--confirm-live` 时只显示计划、不发起 API 调用。
+
+### 测试
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+当前 **160 项**:并发竞态专项、身份与隔离、运行时加固、离线演示回归。
+
