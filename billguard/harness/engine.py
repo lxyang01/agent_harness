@@ -69,12 +69,55 @@ class HarnessEngine:
         self.trace_logger = TraceLogger(sessions.root)
         self.hooks.append(self._trace_hook)
 
+    @staticmethod
+    def compress_history(session: Session, keep_recent: int,
+                         max_pairs: int = 20) -> Session:
+        """确定性压缩:较早轮次进 summary(用户问题→助手结论),工具消息丢弃。
+
+        返回新 Session 对象,不就地修改入参;近 keep_recent 条原文保留。"""
+        messages = session.messages
+        if len(messages) <= keep_recent:
+            return session
+        older, recent = messages[:-keep_recent], messages[-keep_recent:]
+        pairs: list[str] = []
+        pending_question: str | None = None
+        for message in older:
+            if message.role == "user" and not message.tool_call_id:
+                if pending_question:  # 连续提问未获回答:逐条留痕
+                    pairs.append(f"- 问:{pending_question[:120]} 答:(该轮无最终回答)")
+                pending_question = message.content.strip()
+            elif (message.role == "assistant" and not message.tool_call_id
+                  and pending_question):
+                answer = message.content.strip()
+                if answer.startswith("{"):
+                    try:
+                        import json as _json
+                        answer = str(_json.loads(answer).get("final", answer))
+                    except (ValueError, AttributeError):
+                        pass
+                pairs.append(f"- 问:{pending_question[:120]} 答:{answer[:200]}")
+                pending_question = None
+        if pending_question:  # 压缩窗口内未获回答的问题也留痕
+            pairs.append(f"- 问:{pending_question[:120]} 答:(该轮无最终回答)")
+        segments = [line for line in session.summary.splitlines() if line.startswith("- 问:")]
+        segments.extend(pairs)
+        summary = chr(10).join(segments[-max_pairs:])
+        return replace(session, summary=summary, messages=recent)
+
     def run(self, session_id: str, user_input: str) -> AgentResponse:
         user_input = user_input.strip()
         if not user_input:
             raise ValueError("user input cannot be empty")
         validate_user_input(user_input)
         session = self.sessions.load(session_id)
+        if (self.spec.summary_threshold
+                and len(session.messages) > self.spec.summary_threshold):
+            before = len(session.messages)
+            session = self.compress_history(session, self.spec.summary_keep_recent)
+            self.sessions.save(session)
+            trace_id_probe = uuid.uuid4().hex
+            self._emit("history_compressed", trace_id_probe, session_id,
+                       before=before, after=len(session.messages))
         session.messages.append(Message("user", user_input))
         trace_id = uuid.uuid4().hex
         self._emit("run_start", trace_id, session_id, input=user_input, agent=self.spec.name)

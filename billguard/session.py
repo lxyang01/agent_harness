@@ -10,11 +10,9 @@ from .types import Message, Session
 
 
 class SessionStore:
-    def __init__(self, root: str | Path = ".sessions", max_messages: int = 20, keep_recent: int = 8) -> None:
+    def __init__(self, root: str | Path = ".sessions") -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self.max_messages = max_messages
-        self.keep_recent = keep_recent
 
     @staticmethod
     def _key(session_id: str) -> str:
@@ -38,7 +36,8 @@ class SessionStore:
             raise RuntimeError(f"cannot load session {session_id}: {exc}") from exc
 
     def save(self, session: Session) -> None:
-        self._compress(session)
+        # 历史压缩由 HarnessEngine.compress_history 按 AgentSpec 阈值负责;
+        # 存储层只做持久化,不再隐藏改写会话。
         payload = {"session_id": session.session_id, "summary": session.summary,
                    "owner": session.owner,
                    "messages": [message.as_dict() for message in session.messages]}
@@ -50,17 +49,3 @@ class SessionStore:
         finally:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
-
-    def _compress(self, session: Session) -> None:
-        if len(session.messages) <= self.max_messages:
-            return
-        old = session.messages[:-self.keep_recent]
-        lines = []
-        for msg in old:
-            content = " ".join(msg.content.split())[:240]
-            label = msg.name or msg.role
-            lines.append(f"{label}: {content}")
-        previous = f"已有摘要: {session.summary}\n" if session.summary else ""
-        session.summary = (previous + "较早对话:\n" + "\n".join(lines))[-4000:]
-        session.messages = session.messages[-self.keep_recent:]
-
