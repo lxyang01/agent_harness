@@ -605,6 +605,16 @@ class BillGuardApp:
             str(body.get("username", "")).strip(), str(body.get("password", "")))
         return {"ok": True}
 
+    def admin_delete_user(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
+        username = str(body.get("username", "")).strip()
+        if not username:
+            raise ValueError("用户名不能为空")
+        if username == user.username:
+            raise ValueError("不能删除当前登录的账号")
+        self.authenticator.users.delete(username)
+        self.bills.purge_owner(username)  # 删除用户 = 同步删除其全部账单数据
+        return {"deleted": True, "username": username}
+
     def admin_set_disabled(self, user: Any, body: dict[str, Any]) -> dict[str, Any]:
         username = str(body.get("username", "")).strip()
         if not username:
@@ -633,6 +643,7 @@ _CAPABILITY_BY_PATH = {
     "/api/admin/users/role": "users_manage",
     "/api/admin/users/password": "users_manage",
     "/api/admin/users/disable": "users_manage",
+        "/api/admin/users/delete": "users_manage",
 }
 
 
@@ -792,6 +803,8 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
                     result = app.admin_reset_password(body)
                 elif self.path == "/api/admin/users/disable":
                     result = app.admin_set_disabled(user, body)
+                elif self.path == "/api/admin/users/delete":
+                    result = app.admin_delete_user(user, body)
                 else:
                     self._json(404, {"error": "接口不存在"})
                     return
