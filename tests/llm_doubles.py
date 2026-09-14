@@ -1,4 +1,4 @@
-"""测试专用脚本模型:按剧本依次输出 tool_call / final,替代已删除的 Mock 模式。"""
+"""测试专用脚本模型:按剧本依次输出 tool_call / final,不发起真实 API 调用。"""
 from __future__ import annotations
 
 import json
@@ -34,7 +34,7 @@ from typing import Any
 
 
 class PlanningScriptLLM:
-    """PlanningAgent 的确定性脚本模型(原 MockLLM,移入测试基础设施)。"""
+    """PlanningAgent 的确定性脚本模型(测试基础设施)。"""
 
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:
         last = messages[-1]

@@ -149,12 +149,12 @@ def project_search(query: str) -> dict[str, Any]:
         "测试": "Agent 测试应覆盖直接回答、多工具循环、异常、最大步数、Session 隔离和状态恢复。",
         "python": "Python 标准库可用于构建轻量 CLI、JSON 持久化和 HTTP 客户端。",
     }
-    hits = [{"title": key, "snippet": value, "url": f"mock://project-search/{key}"}
+    hits = [{"title": key, "snippet": value, "url": f"local://project-search/{key}"}
             for key, value in corpus.items() if key.lower() in query.lower()]
     if not hits:
-        hits = [{"title": query, "snippet": "未命中本地语料，这是离线 Mock 搜索结果。",
-                 "url": "mock://project-search/no-hit"}]
-    return {"query": query, "results": hits, "source": "mock"}
+        hits = [{"title": query, "snippet": "未命中本地语料，请换用更短的关键词。",
+                 "url": "local://project-search/no-hit"}]
+    return {"query": query, "results": hits, "source": "local_corpus"}
 
 
 class DocumentService:
@@ -314,7 +314,7 @@ def build_planning_registry(session_id: str, docs_root: str | Path,
     registry = ToolRegistry()
     registry.register(Tool("calculator", "精确计算项目工期、成本、比例等数学表达式",
                            _object({"expression": {"type": "string"}}, ["expression"]), calculator))
-    registry.register(Tool("search", "搜索项目规划和技术背景信息（当前为离线 Mock）",
+    registry.register(Tool("search", "在本地项目语料中检索规划与技术背景信息",
                            _object({"query": {"type": "string"}}, ["query"]), project_search))
     registry.register(Tool("list_docs", "列出项目文档目录中的可读文档", _object({}, []), docs.list_docs))
     registry.register(Tool("read_doc", "读取项目文档；路径相对于受限 docs 目录",
