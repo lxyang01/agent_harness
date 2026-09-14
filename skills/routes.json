@@ -10,7 +10,11 @@
     "概览",
     "消费",
     "分类",
-    "钱花哪儿"
+    "钱花哪儿",
+    "标记",
+    "标为",
+    "已确认",
+    "核查状态"
    ],
    "allowed_tools": [
     "bill_overview",
@@ -18,7 +22,8 @@
     "bill_samples",
     "bill.aggregate",
     "bill.query",
-    "bill.get_samples"
+    "bill.get_samples",
+    "bill.update_status"
    ]
   },
   {
