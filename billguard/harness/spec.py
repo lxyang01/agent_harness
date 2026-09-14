@@ -14,6 +14,8 @@ class AgentSpec:
     run_timeout: float | None = None  # 单次 run 的总执行时间预算(秒),None=不限
     summary_threshold: int = 40  # 历史消息超过该条数触发确定性压缩(0=关闭)
     summary_keep_recent: int = 12  # 压缩后保留的近期消息条数
+    tool_result_context_limit: int = 1500  # 进入模型会话的工具结果字符上限(0=不截断)
+    max_context_chars: int = 80_000  # 单次模型调用的上下文字符预算(0=不限)
 
     def __post_init__(self) -> None:
         if not self.name.strip():

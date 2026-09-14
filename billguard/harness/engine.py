@@ -147,6 +147,7 @@ class HarnessEngine:
             artifact_paths=[],
             completed_tools=[],
             request_contract=request_contract,
+            full_payloads=[],
         )
 
     def resume(self, approval_id: str) -> AgentResponse:
@@ -203,6 +204,7 @@ class HarnessEngine:
             trace_id=approval.trace_id,
             session_id=approval.session_id,
             user_input=str(checkpoint["user_input"]),
+            full_payloads=list(checkpoint.get("full_tool_payloads", [])),
             active_skills=active_skills,
             allowed_tools=allowed_tools,
             start_step=approval.step + 1,
@@ -238,7 +240,9 @@ class HarnessEngine:
               active_skills: list[SkillActivation], allowed_tools: tuple[str, ...],
               start_step: int, execution_summaries: list[str],
               artifact_paths: list[str], completed_tools: list[str],
-              request_contract: RequestContract) -> AgentResponse:
+              request_contract: RequestContract,
+              full_payloads: list[str] | None = None) -> AgentResponse:
+        full_payloads = [] if full_payloads is None else full_payloads
         started_at = time.perf_counter()
         for step in range(start_step, self.spec.max_steps + 1):
             if (self.spec.run_timeout is not None
@@ -320,10 +324,9 @@ class HarnessEngine:
                         "output_redacted", trace_id, session_id, step,
                         redactions=redactions,
                     )
-                evidence_values = [
+                evidence_values = full_payloads + [
                     message.content for message in working
-                    if message.role == "tool"
-                    or (message.role == "assistant" and message.tool_call_id)
+                    if message.role == "assistant" and message.tool_call_id
                 ]
                 unsupported_numbers = unsupported_numeric_claims(
                     safe_final, evidence_values,
@@ -394,12 +397,13 @@ class HarnessEngine:
                         session, trace_id, session_id, user_input, step,
                         call.name, call.arguments, call_id, active_skills,
                         allowed_tools, execution_summaries, artifact_paths, completed_tools,
+                        full_payloads=full_payloads,
                     )
 
             execution = self._execute_tool(
                 session, working, trace_id, session_id, step,
                 call.name, call.arguments, call_id, allowed_tools,
-                execution_summaries, artifact_paths,
+                execution_summaries, artifact_paths, full_payloads,
             )
             if execution.succeeded:
                 completed_tools.append(call.name)
@@ -418,11 +422,13 @@ class HarnessEngine:
                             allowed_tools: tuple[str, ...],
                             execution_summaries: list[str],
                             artifact_paths: list[str],
-                            completed_tools: list[str]) -> AgentResponse:
+                            completed_tools: list[str],
+                            full_payloads: list[str] | None = None) -> AgentResponse:
         assert self.policy_gateway is not None
         policy = self.tools.get(tool_name).policy
         checkpoint = {
             "schema_version": 2,
+            "full_tool_payloads": list(full_payloads or []),
             "session_id": session_id,
             "trace_id": trace_id,
             "user_input": user_input,
@@ -458,7 +464,8 @@ class HarnessEngine:
                       session_id: str, step: int, tool_name: str,
                       arguments: dict[str, Any], call_id: str,
                       allowed_tools: tuple[str, ...], summaries: list[str],
-                      artifact_paths: list[str]) -> _ToolExecution:
+                      artifact_paths: list[str],
+                      full_payloads: list[str] | None = None) -> _ToolExecution:
         self._emit(
             "tool_start", trace_id, session_id, step,
             tool=tool_name, arguments=arguments,
@@ -478,6 +485,8 @@ class HarnessEngine:
                 latency_ms=round((time.perf_counter() - tool_started) * 1000, 2),
             )
             execution = _ToolExecution(payload, True)
+            if full_payloads is not None:
+                full_payloads.append(payload)  # 门禁用完整值,截断只影响模型可见面
         except ToolError as exc:
             payload = json.dumps({"error": str(exc)}, ensure_ascii=False)
             self._emit(
@@ -487,9 +496,19 @@ class HarnessEngine:
             )
             execution = _ToolExecution(payload, False, str(exc))
         self._append_tool_messages(
-            session, working, tool_name, arguments, call_id, payload,
+            session, working, tool_name, arguments, call_id,
+            self._contextual_payload(payload, trace_id, step),
         )
         return execution
+
+    def _contextual_payload(self, payload: str, trace_id: str, step: int) -> str:
+        """模型可见面截断;完整结果已在 tool_end Trace 与门禁证据中。"""
+        limit = self.spec.tool_result_context_limit
+        if not limit or len(payload) <= limit:
+            return payload
+        notice = (chr(10) + f"…[工具结果过长,已截断至 {limit} 字符;完整结果存证于 Trace 第 {step} 步"
+                  + f"({trace_id[:8]}),可依据以上摘要作答]")
+        return payload[:limit] + notice
 
     def _append_tool_error(self, session: Session, working: list[Message],
                            trace_id: str, session_id: str, step: int,

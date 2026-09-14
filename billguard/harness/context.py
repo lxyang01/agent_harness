@@ -56,5 +56,19 @@ class ContextBuilder:
             ))
         if summary:
             result.append(Message("system", f"较早会话摘要：\n{summary}"))
-        result.extend(messages)
+        budget = getattr(spec, "max_context_chars", 0)
+        if not budget:
+            result.extend(messages)
+            return result
+        # 预算兜底:近期消息从新到旧装入;最新一条(本轮输入)永远保留
+        used = sum(len(message.content) for message in result)
+        kept: list[Message] = []
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if used + len(message.content) > budget and kept:
+                break  # 已有保底消息且超出预算:更旧的全部丢弃
+            kept.append(message)
+            used += len(message.content)
+        kept.reverse()
+        result.extend(kept)
         return result
