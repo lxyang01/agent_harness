@@ -980,19 +980,22 @@ class BillService:
 
     def purge_owner(self, owner: str, operator: str = "", note: str = "") -> dict:
         """删除用户的全部业务数据(账号删除/自助清空时调用);不触碰 NULL 存量行。"""
+        # admin 的可见范围包含 NULL 存量行,清空语义与其视图一致:连带清除
+        where, params = (("owner = ? OR owner IS NULL", (owner,))
+                         if owner == "admin" else ("owner = ?", (owner,)))
         with self._connect() as db:
             counts = {
                 "transactions": db.execute(
-                    "DELETE FROM transactions WHERE owner = ?", (owner,)).rowcount,
+                    f"DELETE FROM transactions WHERE {where}", params).rowcount,
                 "subscriptions": db.execute(
-                    "DELETE FROM subscriptions WHERE owner = ?", (owner,)).rowcount,
+                    f"DELETE FROM subscriptions WHERE {where}", params).rowcount,
                 "categories": db.execute(
-                    "DELETE FROM categories WHERE owner = ?", (owner,)).rowcount,
+                    f"DELETE FROM categories WHERE {where}", params).rowcount,
                 "reports": db.execute(
-                    "DELETE FROM reports WHERE owner = ?", (owner,)).rowcount,
+                    f"DELETE FROM reports WHERE {where}", params).rowcount,
             }
-            db.execute("DELETE FROM tx_audits WHERE owner = ?", (owner,))
-            db.execute("DELETE FROM imports WHERE owner = ?", (owner,))
+            db.execute(f"DELETE FROM tx_audits WHERE {where}", params)
+            db.execute(f"DELETE FROM imports WHERE {where}", params)
             if operator:  # 清空后留一条审计标记,证明发生过自助清空
                 db.execute(
                     "INSERT INTO tx_audits(tx_id, action, operator, new_value, changed_at, owner) "
