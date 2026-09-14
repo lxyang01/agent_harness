@@ -2,7 +2,7 @@
 
 让 LLM Agent 直接碰业务数据是不可信的:它会编数字、越权调工具、被账单备注里的提示注入带着跑,写操作更没人拦。BillGuard 是这个问题的一个完整工程答案 —— 一个**框架无关的可审计 Agent Harness**,以"分层防线 + 可验证"为设计原则,业务载体是个人账单守卫:从账单与订阅 CSV 中发现涨价、重复扣费和大额离群,输出带证据的行动计划。
 
-每一层防线都可独立验证:**22 条对抗探针**(零费用、确定性)全部防御成功,155 项单元测试覆盖并发竞态、权限边界与数据隔离。
+每一层防线都可独立验证:**22 条对抗探针**(零费用、确定性)全部防御成功,160 项单元测试覆盖并发竞态、权限边界与数据隔离。
 
 | 防线 | 一句话证据 |
 | --- | --- |
@@ -28,24 +28,129 @@ python -m billguard.web
 
 打开 <http://127.0.0.1:8000> 登录。角色:admin=用户管理+全部业务,user=业务写入+审批。**每个用户的数据相互隔离** —— 各自导入自己的账单副本,看板与守卫 Agent 只能看到本人数据。默认离线 Mock 模式,不需要 API Key。
 
-### 三分钟演示剧本(Mock 模式)
+**三分钟演示剧本**(导入 `sample_data/bills_demo.csv` + `subscriptions_demo.csv` 后):
 
-1. 登录后进入"账单导入",依次导入两份样例:`sample_data/bills_demo.csv` 和 `sample_data/subscriptions_demo.csv`(内嵌两条故事线:腾讯视频预期 ¥15/月、8 月实扣 ¥25;百度网盘同日 5 分钟内两笔 ¥18)
-2. 问守卫 Agent:**"最近有什么异常扣费"** → 检出腾讯视频涨价
-3. 问:**"有没有重复扣费"** → 检出百度网盘两笔
-4. 问:**"生成本月守卫报告"** → 四章节报告(支出事实/异常清单/根因推测/行动计划),缺章节会被契约拦截
-5. 问:**"帮我取消腾讯视频订阅"** → 本地模式提示需接工单服务;按下方"进阶运维"接入 Work Item MCP 后,同一句话走完整三阶段审批
+1. 问守卫 Agent:**"最近有什么异常扣费"** → 检出腾讯视频涨价(预期 ¥15/月,8 月实扣 ¥25)
+2. 问:**"有没有重复扣费"** → 检出百度网盘同日 5 分钟内两笔 ¥18
+3. 问:**"生成本月守卫报告"** → 四章节报告(支出事实/异常清单/根因推测/行动计划)
+4. 问:**"帮我取消腾讯视频订阅"** → 接入 Work Item MCP 后走完整三阶段审批(见命令速查)
+5. 演示完想重来?导入面板右下角"**清空我的数据**" → 重新导入
 
-### 切换真实模型
+## 命令速查
+
+**所有可用命令集中在本节。**
+
+### 服务启动与参数
+
+```powershell
+python -m billguard.web [--选项]
+```
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--llm mock\|openai` | mock | 离线 Mock 或 OpenAI 兼容 API |
+| `--tool-source local\|mcp` | local | 本地工具或 MCP 动态发现 |
+| `--work-item-mcp-url` | 空 | 接入远程 Work Item MCP(解锁三阶段审批演示) |
+| `--max-concurrent-llm` | 4 | 模型并发上限,超限 429 |
+| `--max-threads` / `--queue-capacity` | 16 / 32 | HTTP 线程池与排队容量,满载 503 |
+| `--run-timeout` | 120s | 单次 Agent 运行总预算,超限安全停止 |
+| `--data-dir` | .sessions | 数据根目录 |
+| `--llm-proxy` / `--base-url` / `--model` | — | 模型接入三件套 |
+
+### 切换真实模型(OpenRouter)
 
 ```powershell
 $env:OPENROUTER_API_KEY="你的 Key"
 python -m billguard.web --tool-source mcp --llm openai --base-url "https://openrouter.ai/api/v1" --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0.1:7897"
 ```
 
-不要将 API Key 写入代码或提交到 Git。使用本地 MCP 工具可省略 `--tool-source mcp`。
+不要将 API Key 写入代码或提交到 Git。
 
-## 架构
+### 远程 Work Item MCP(解锁三阶段审批演示)
+
+```powershell
+# 窗口一:启动 Work Item MCP
+python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" serve --transport streamable-http --host 127.0.0.1 --port 8020
+# 窗口二:Web 接入
+python -m billguard.web --tool-source mcp --work-item-mcp-url "http://127.0.0.1:8020/mcp"
+```
+
+```powershell
+# 工单管理(带外审批也可走 Web 审批中心)
+python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" pending
+python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" approve "APR-XXXXXXXXXX" --by "product-owner"
+python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" reject "APR-XXXXXXXXXX" --by "product-owner"
+```
+
+### 用户管理 CLI
+
+```powershell
+python -m billguard.users add <用户名> --role <admin|user>   # 建号,--password-stdin 可从管道读密码
+python -m billguard.users list
+python -m billguard.users set-role <用户名> --role <角色>
+python -m billguard.users reset-password <用户名>
+python -m billguard.users disable <用户名> / enable <用户名>
+```
+
+保护约束:不能禁用/删除自己,不能动最后一个启用中的 admin;删除用户会级联删除其全部账单数据。
+
+### 评测命令
+
+```powershell
+# 对抗评测(确定性,零费用)—— 22 条攻击探针
+python -m billguard.adversarial_eval
+
+# 路由评测(确定性,零费用)—— 50 条用例三组消融
+python -m billguard.eval --variant compare
+
+# 真实模型端到端评测(产生 API 费用)
+$env:OPENROUTER_API_KEY="你的 Key"
+python -m billguard.live_eval --limit 3 --proxy "http://127.0.0.1:7897" --confirm-live   # 冒烟
+python -m billguard.live_eval --repeats 3 --proxy "http://127.0.0.1:7897" --confirm-live # 稳定性(15×3)
+python -m billguard.live_eval --cases "7-10,12-15" --proxy "http://127.0.0.1:7897" --confirm-live  # 只回归指定用例
+```
+
+没有 `--confirm-live` 时只显示计划、不发起 API 调用。
+
+### 测试
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+当前 **160 项**:并发竞态专项、身份与隔离、运行时加固、离线演示回归。
+
+## 功能说明
+
+### 工作台
+
+- **支出概览**:总支出/笔数/待核查/最大单笔,类别与商户分布,每日趋势,订阅清单(周期/预期/最近扣款)*—— 试试:"这个月花了多少钱"*
+- **守卫 Agent**:总结结构、比较周期、识别异常、搜交易、读脱敏样本,区分数据事实与推测;回答附带可点击的"数据依据"直达交易明细 *—— 试试:"支付类支出最近有什么变化"*
+- **交易明细**:多维筛选与分页,导出 CSV(含未脱敏备注,登录用户可用),人工修正类别,批量核查(≤200)留审计
+- **类别管理**:关键词规则增删改/启停/审计;重匹配只替换规则类别,人工类别保留
+- **账单导入**:UTF-8 CSV 按交易编号去重、自动归类,记录成功/重复/失败明细;支持账单与订阅两份文件;**清空我的数据**一键重来(仅清当前用户,他人与 Session 不受影响)
+- **守卫报告**:保存/复制/导出 Markdown/A4 打印
+- **审批中心**:高风险写操作在此暂停等待人工决定;卡片直接展示操作内容(标题/说明/优先级/关键参数),批准或拒绝前看得清要放行什么
+- **Session 与 Trace**:会话按用户隔离;运行观测面板只读回放 Trace —— Skill 激活、模型决策、耗时、Token、审批暂停/恢复
+
+### 数据与隐私
+
+- 账单库 `.sessions/billguard/bills/`;Session 与 Trace `.../sessions/`;审批 Checkpoint `.../policy/`;认证库 `.../auth/`(PBKDF2 密码哈希,会话只存 token 哈希);评测报告 `.sessions/evaluations/`
+- Agent 最多读取 20 条样本;发给模型的搜索结果与样本做基础手机号/邮箱脱敏;原始备注只在本机页面展示
+- 真实账单数据不能离开内网时,使用本地模型或纯统计看板
+
+### CSV 格式
+
+账单必要字段 `tx_id,paid_at,merchant,category,amount,method,note`;订阅必要字段 `name,merchant,cycle,expected_amount`;支持对应中文表头。
+
+```csv
+tx_id,paid_at,merchant,category,amount,method,note
+TX0001,2026-06-01 11:41:15,美团外卖,餐饮,21.28,微信支付,
+```
+
+## 技术说明
+
+### 架构
 
 ```text
 账单 CSV + 订阅 CSV
@@ -64,13 +169,11 @@ python -m billguard.web --tool-source mcp --llm openai --base-url "https://openr
 
 LLM 不执行任意 SQL。它只能调用受控工具查询概览、环比、异常、脱敏样本和订阅比对,回答中的每个数字都可追溯到工具结果;模型调用、工具调用、错误与最终答案全量写入 JSONL Trace。`billguard/agents/planning.py` 保留了一个 PlanningAgent,展示同一 Harness 换业务载体的成本接近于零。
 
-## 核心能力
-
 ### Skill Runtime
 
 - 启动时只发现 `SKILL.md` 的名称和描述,激活时才加载完整正文
 - `$skill-name` 显式选择 + 业务触发词隐式路由;每次最多激活两个 Skill,记录内容哈希、匹配原因和分数
-- Skill 白名单同时作用于模型可见工具与执行校验;路由失败、内容损坏均安全失败;`skill_activated`/`skill_error` 写入 Trace
+- Skill 白名单同时作用于模型可见工具与执行校验;路由失败、内容损坏均安全失败
 
 | Skill | 用途 |
 | --- | --- |
@@ -79,7 +182,7 @@ LLM 不执行任意 SQL。它只能调用受控工具查询概览、环比、异
 | `root-cause-analysis` | 区分交易事实、原因假设、反向证据和验证动作 |
 | `monthly-guard-report` | 证据化的月度守卫报告与行动计划 |
 
-路由与工具策略位于 `skills/routes.json`。月度守卫报告有固定四章节完成契约(**支出事实 / 异常清单 / 根因推测 / 行动计划**),缺任何章节会被拦截并获得可执行的纠正反馈。
+月度守卫报告有固定四章节完成契约(**支出事实 / 异常清单 / 根因推测 / 行动计划**),缺任何章节会被拦截并获得可执行的纠正反馈。
 
 **四类异常的确定性阈值**(与 `billguard/bills.py` 常量一致,随结果一并返回供核对):
 
@@ -99,17 +202,9 @@ LLM 不执行任意 SQL。它只能调用受控工具查询概览、环比、异
 | Bill Data MCP | stdio / Streamable HTTP | 6 Tools、3 Resources、2 Prompts |
 | Work Item MCP | Streamable HTTP / stdio | 查询工单、准备工单、审批后幂等提交 |
 
-`MCPClientManager` 在后台事件循环维护持久 `ClientSession`,对同步 Harness 提供超时受控接口;远程工具以 `server.tool` 命名空间动态注册(如 `bill.detect_anomalies`、`work-items.commit_issue`)。共享的 MCP 子进程无法认证,因此 owner 身份在**工具边界服务端注入**:web 层包装每个 `bill.*` 工具强制覆盖 `owner` 并从模型可见 Schema 中移除 —— 伪造无效。
+`MCPClientManager` 在后台事件循环维护持久 `ClientSession`,对同步 Harness 提供超时受控接口;远程工具以 `server.tool` 命名空间动态注册。共享的 MCP 子进程无法认证,因此 owner 身份在**工具边界服务端注入**:web 层包装每个 `bill.*` 工具强制覆盖 `owner` 并从模型可见 Schema 中移除 —— 伪造无效。
 
-工单创建采用三阶段协议:
-
-```text
-Agent: prepare_issue
-  -> Human: approve/reject outside MCP tool channel
-  -> Agent: commit_issue
-```
-
-`approve` 不出现在工具列表;未经人工批准的 `commit_issue` 失败,批准后重复提交幂等返回同一工单。
+工单创建采用三阶段协议,`approve` 不出现在工具列表中;未经人工批准的 `commit_issue` 失败,批准后重复提交幂等返回同一工单。
 
 ### 策略网关与可恢复审批
 
@@ -130,17 +225,9 @@ Harness 还从用户原话编译**动态契约**:"最多 8 条"变成参数上�
 - `chat` 与审批恢复共用 per-session 锁,消除会话文件丢失更新
 - 有界线程池 + 排队(满载 503)、LLM 并发上限(429)、单次运行总时间预算(安全停止)
 
-## 评测
+### 评测体系
 
-### 对抗评测(确定性,零费用)
-
-```powershell
-python -m billguard.adversarial_eval
-```
-
-用恶意脚本模型直接驱动真实 Parser、Harness、Registry、Policy、Checkpoint、Session 与沙箱组件。覆盖:模型协议破坏、工具越权、Schema 注入、无限循环、参数/输出契约、提前结束、审批绕过/重放、Checkpoint 篡改、无证据数字、PII 泄露、资源预算、伪造审批身份、路径穿越、并发审批双提交、跨用户数据泄露。
-
-基线演进(每一步都对应一次真实的工程修复):
+**对抗评测**:用恶意脚本模型直接驱动真实 Parser、Harness、Registry、Policy、Checkpoint、Session 与沙箱组件,覆盖模型协议破坏、工具越权、Schema 注入、无限循环、参数/输出契约、提前结束、审批绕过/重放、Checkpoint 篡改、无证据数字、PII 泄露、资源预算、伪造审批身份、路径穿越、并发审批双提交、跨用户数据泄露。基线演进(每一步对应一次真实工程修复):
 
 | 轮次 | 结果 |
 | --- | --- |
@@ -150,38 +237,11 @@ python -m billguard.adversarial_eval
 | + 并发加固(乐观并发/会话锁) | 21/21 |
 | + 数据隔离(owner 边界 + MCP 注入) | **22/22(100%)** |
 
-完整报告在本地 `docs/adversarial_evaluation_report.md`(命令可随时再生成)。
+**路由评测**:50 条固定中文用例三组消融,Baseline 20% → Skills 100% → Full 100%;完成契约指标在该数据集为 N/A(由对抗探针与真实模型评测覆盖)。
 
-### 路由评测(确定性,零费用)
+**真实模型评测**:每次评测创建隔离数据快照与临时 MCP 服务;日期相对评测日平移;工单用例只运行到审批 Checkpoint。模型客户端有界重试,连续 3 次基础设施错误自动熔断。报告含任务成功率、Skill 路由、工具选择与顺序、参数准确率、证据命中、数字 Groundedness、因果措辞安全、报告结构、审批违规率、重复稳定性、P95 延迟与 Token 汇总,写入 `.sessions/evaluations/`,可在 Web"自动评测"面板查看。
 
-```powershell
-python -m billguard.eval --variant compare
-```
-
-50 条固定中文用例,三组消融:Baseline 20%(10/50)→ Skills 100%(50/50)→ Full 100%(50/50)。完成契约指标在该数据集为 N/A(用例只声明期望 Skill;契约本身由对抗探针与真实模型评测覆盖)。
-
-### 真实模型端到端评测
-
-```powershell
-$env:OPENROUTER_API_KEY="你的 Key"
-python -m billguard.live_eval --limit 3 --proxy "http://127.0.0.1:7897" --confirm-live   # 冒烟
-python -m billguard.live_eval --repeats 3 --proxy "http://127.0.0.1:7897" --confirm-live # 稳定性(15×3)
-python -m billguard.live_eval --cases "7-10,12-15" --proxy "http://127.0.0.1:7897" --confirm-live  # 只回归指定用例
-```
-
-没有 `--confirm-live` 时只显示计划、不发起 API 调用。Runner 每次评测创建隔离数据快照与临时 MCP 服务;日期相对评测日平移;工单用例只运行到审批 Checkpoint。模型客户端对 TLS/连接/429/5xx 有界重试,连续 3 次基础设施错误自动熔断并单独统计。报告含任务成功率、Skill 路由、工具选择与顺序、参数准确率、证据命中、数字 Groundedness、因果措辞安全、报告结构、审批违规率、重复稳定性、P95 延迟与 Token 汇总,写入 `.sessions/evaluations/`,可在 Web"自动评测"面板查看。
-
-## 工作台功能
-
-- **支出概览**:总支出/笔数/待核查/最大单笔,类别与商户分布,每日趋势,订阅清单(周期/预期/最近扣款)*—— 试试:"这个月花了多少钱"*
-- **守卫 Agent**:总结结构、比较周期、识别异常、搜交易、读脱敏样本,区分数据事实与推测;回答附带可点击的"数据依据"直达交易明细 *—— 试试:"支付类支出最近有什么变化"*
-- **交易明细**:多维筛选与分页,导出 CSV(含未脱敏备注,登录用户可用),人工修正类别,批量核查(≤200)留审计
-- **类别管理**:关键词规则增删改/启停/审计;重匹配只替换规则类别,人工类别保留
-- **账单导入**:UTF-8 CSV 按交易编号去重、自动归类,记录成功/重复/失败明细
-- **守卫报告**:保存/复制/导出 Markdown/A4 打印
-- **Session 与 Trace**:会话按用户隔离;运行观测面板只读回放 Trace —— Skill 激活、模型决策、耗时、Token、审批暂停/恢复
-
-## 项目结构
+### 项目结构
 
 ```text
 billguard/
@@ -198,75 +258,12 @@ billguard/
 ├─ evaluation.py / live_evaluation.py  # 路由消融 / 真实模型 E2E
 └─ web_static/         # 原生 JS 前端
 skills/                # 4 个 SKILL.md + routes.json(运行时加载)
-tests/                 # 155 项:并发竞态/隔离/契约/演示回归
+tests/                 # 160 项:并发竞态/隔离/契约/演示回归
 evals/                 # 50 路由用例 + 15 live 用例
 sample_data/           # 带剧本的合成账单(生成器在 scripts/)
 ```
 
-## 运行参数速查
-
-| 参数 | 默认 | 说明 |
-| --- | --- | --- |
-| `--llm mock\|openai` | mock | 离线 Mock 或 OpenAI 兼容 API |
-| `--tool-source local\|mcp` | local | 本地工具或 MCP 动态发现 |
-| `--work-item-mcp-url` | 空 | 接入远程 Work Item MCP(解锁三阶段审批演示) |
-| `--max-concurrent-llm` | 4 | 模型并发上限,超限 429 |
-| `--max-threads` / `--queue-capacity` | 16 / 32 | HTTP 线程池与排队容量,满载 503 |
-| `--run-timeout` | 120s | 单次 Agent 运行总预算,超限安全停止 |
-| `--data-dir` | .sessions | 数据根目录(billguard/ 子树按用户隔离) |
-| `--llm-proxy` / `--base-url` / `--model` | — | 模型接入三件套 |
-
-## 进阶运维
-
-### 远程 Work Item MCP(解锁三阶段审批演示)
-
-```powershell
-# 窗口一:启动 Work Item MCP
-python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" serve --transport streamable-http --host 127.0.0.1 --port 8020
-# 窗口二:Web 接入
-python -m billguard.web --tool-source mcp --work-item-mcp-url "http://127.0.0.1:8020/mcp"
-```
-
-```powershell
-python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" pending
-python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" approve "APR-XXXXXXXXXX" --by "product-owner"
-python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" reject "APR-XXXXXXXXXX" --by "product-owner"
-```
-
-### 用户管理 CLI
-
-```powershell
-python -m billguard.users add <用户名> --role <admin|user>   # 建号,--password-stdin 可从管道读密码
-python -m billguard.users list
-python -m billguard.users set-role <用户名> --role <角色>
-python -m billguard.users reset-password <用户名>
-python -m billguard.users disable <用户名> / enable <用户名>
-```
-
-保护约束:不能禁用/删除自己,不能动最后一个启用中的 admin;删除用户会级联删除其全部账单数据。Web 内置等价管理面板(admin 可见)。
-
-## 数据与隐私
-
-- 账单库 `.sessions/billguard/bills/`;Session 与 Trace `.../sessions/`;审批 Checkpoint `.../policy/`;认证库 `.../auth/`(PBKDF2 密码哈希,会话只存 token 哈希);评测报告 `.sessions/evaluations/`
-- Agent 最多读取 20 条样本;发给模型的搜索结果与样本做基础手机号/邮箱脱敏;原始备注只在本机页面展示
-- 真实账单数据不能离开内网时,使用本地模型或纯统计看板
-
-**CSV 格式**:账单必要字段 `tx_id,paid_at,merchant,category,amount,method,note`;订阅必要字段 `name,merchant,cycle,expected_amount`;支持对应中文表头。
-
-```csv
-tx_id,paid_at,merchant,category,amount,method,note
-TX0001,2026-06-01 11:41:15,美团外卖,餐饮,21.28,微信支付,
-```
-
-## 当前边界
+### 当前边界
 
 - 企业级 SSO(OIDC/LDAP)尚未接入(单点身份解析锚点已预留);类别归类为关键词规则;脱敏为规则级,不替代企业级 DLP;PDF 依赖浏览器打印
 - 设计文档保留在本地 `docs/` 目录,未随仓库分发
-
-## 测试
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
-当前 **155 项**:并发竞态专项、身份与隔离、运行时加固、离线演示回归(报告四章节、三阶段审批、多轮会话)。

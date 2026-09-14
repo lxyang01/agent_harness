@@ -44,3 +44,4 @@ input[type="checkbox"]{width:15px;height:15px;padding:0;accent-color:var(--accen
 .drop-zone.subs .upload-icon{width:30px;height:30px;margin-bottom:8px;font-size:15px}
 
 #bills-rows strong{color:#1f3a66;font-size:12px}
+.approval-args{display:grid;gap:7px;margin:13px 0;padding:11px 13px;border:1px solid #cfe0f5;border-radius:9px;background:#f4f8fe}.approval-args div{display:grid;gap:2px}.approval-args dt{color:#71809a;font-size:8px;letter-spacing:.06em}.approval-args dd{margin:0;color:#2c3e58;font-size:11px;line-height:1.6;overflow-wrap:anywhere}
