@@ -269,3 +269,28 @@ class PurgeMyDataTests(unittest.TestCase):
             self.assertEqual(1, app.bills.for_user("mallory").overview()["count"])  # 他人不受影响
             sessions = app.list_sessions(alice)
             self.assertIn("s-alice", [item["id"] for item in sessions])  # Session 保留
+
+
+class PurgeLegacyDataTests(unittest.TestCase):
+    def test_admin_purge_clears_null_legacy_rows_visible_to_admin(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = build_app(root)
+            boss, mallory = User("admin", "admin"), User("mallory", "user")
+            # NULL 存量行(数据隔离前导入的旧数据):仅 admin 可见
+            app.bills.import_bills("legacy.csv", DEMO)
+            self.assertEqual(1, app.snapshot(boss, "s")["overview"]["count"])
+
+            result = app.purge_my_data(boss, {})
+
+            self.assertEqual(1, result["transactions"])
+            self.assertEqual(0, app.snapshot(boss, "s")["overview"]["count"])
+
+    def test_non_admin_purge_leaves_null_legacy_rows(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = build_app(root)
+            app.bills.import_bills("legacy.csv", DEMO)  # NULL 存量
+            mallory = User("mallory", "user")
+            app.purge_my_data(mallory, {})  # mallory 看不到 NULL 行,也不应清掉它们
+            self.assertEqual(1, app.bills.for_user("admin").overview()["count"])
