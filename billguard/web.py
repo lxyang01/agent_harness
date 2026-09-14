@@ -7,6 +7,7 @@ import json
 import mimetypes
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -32,8 +33,66 @@ from .work_items import WorkItemError, WorkItemStore
 STATIC_ROOT = Path(__file__).with_name("web_static")
 
 
+CRLF = chr(13) + chr(10)  # 避免 bash heredoc 转义歧义
+
+
 class BusyError(RuntimeError):
     """429: all model-concurrency slots are taken; retry shortly."""
+
+
+class BoundedHTTPServer(ThreadingHTTPServer):
+    """有界线程池 + 排队容量:超出(工作线程+队列)的请求立即返回 503。"""
+
+    daemon_threads = True
+
+    def __init__(self, address, handler, max_threads: int = 16,
+                 queue_capacity: int = 32) -> None:
+        super().__init__(address, handler)
+        self._executor = ThreadPoolExecutor(max_workers=max_threads)
+        self._capacity = threading.BoundedSemaphore(max_threads + queue_capacity)
+
+    def process_request(self, request, client_address) -> None:
+        if not self._capacity.acquire(blocking=False):
+            self._reject_busy(request)
+            return
+        try:
+            self._executor.submit(self._process_request, request, client_address)
+        except RuntimeError:  # executor 已关闭
+            self._capacity.release()
+            self._reject_busy(request)
+
+    def _process_request(self, request, client_address) -> None:
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            try:
+                self.shutdown_request(request)
+            finally:
+                self._capacity.release()
+
+    def _reject_busy(self, request) -> None:
+        payload = json.dumps({"error": "服务繁忙,请稍后重试"}, ensure_ascii=False).encode("utf-8")
+        header = (
+            "HTTP/1.1 503 Service Unavailable" + CRLF
+            + "Content-Type: application/json; charset=utf-8" + CRLF
+            + "Content-Length: " + str(len(payload)) + CRLF
+            + "Connection: close" + CRLF + CRLF
+        ).encode("ascii")
+        try:
+            request.sendall(header + payload)
+        except OSError:
+            pass
+        finally:
+            try:
+                self.shutdown_request(request)
+            except OSError:
+                pass
+
+    def server_close(self) -> None:
+        super().server_close()
+        self._executor.shutdown(wait=False)
 
 
 def _make_owner_wrapper(original: Any, owner: str, allowed: frozenset[str],
@@ -96,7 +155,8 @@ class BillGuardApp:
                  policy_gateway: PolicyGateway | None = None,
                  work_item_store: WorkItemStore | None = None,
                  authenticator: Any = None,
-                 max_concurrent_llm: int = 4) -> None:
+                 max_concurrent_llm: int = 4,
+                 run_timeout: float | None = None) -> None:
         if max_concurrent_llm < 1:
             raise ValueError("max_concurrent_llm 必须不小于 1")
         self.data_dir = Path(data_dir)
@@ -113,6 +173,7 @@ class BillGuardApp:
         self.work_item_store = work_item_store
         self.authenticator = authenticator
         self._llm_slots = threading.BoundedSemaphore(max_concurrent_llm)
+        self.run_timeout = run_timeout
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
@@ -268,7 +329,8 @@ class BillGuardApp:
     def _agent(self, user: Any, session_id: str):
         if self.mcp_manager is None:
             # 本地模式:工具注册表按当前用户装配受限视图,Agent 只能查/写本人数据
-            return create_bill_agent(self.llm, session_id, self.session_dir, self._scoped(user))
+            return create_bill_agent(self.llm, session_id, self.session_dir, self._scoped(user),
+                                     run_timeout=self.run_timeout)
         # MCP 模式:工具注册完成后按当前用户注入 owner 身份(模型不可见、不可伪造)
         registry = ToolRegistry()
         for snapshot in self.mcp_manager.snapshots():
@@ -277,6 +339,7 @@ class BillGuardApp:
             self.llm, session_id, self.mcp_manager, self.session_dir,
             policy_gateway=self.policy_gateway,
             registry=inject_owner_identity(registry, user.username),
+            run_timeout=self.run_timeout,
         )
 
     def decide_approval(self, user: Any, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -750,7 +813,9 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
           base_url: str = "https://api.openai.com/v1", tool_source: str = "local",
           mcp_timeout: float = 20.0, work_item_mcp_url: str = "",
           work_item_data_dir: str = ".sessions/work-items",
-          llm_proxy: str | None = None, max_concurrent_llm: int = 4) -> None:
+          llm_proxy: str | None = None, max_concurrent_llm: int = 4,
+          run_timeout: float = 120.0, max_threads: int = 16,
+          queue_capacity: int = 32) -> None:
     llm = (BillMockLLM() if llm_name == "mock" else
            OpenAICompatibleLLM(model, base_url=base_url, proxy=llm_proxy))
     mcp_manager: MCPClientManager | None = None
@@ -776,11 +841,12 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
         print('  python -m billguard.users --data-dir <data-dir> add admin --role admin')
         raise SystemExit(1)
     authenticator = Authenticator(users_store, AuthSessionStore(auth_root))
-    server = ThreadingHTTPServer(
+    server = BoundedHTTPServer(
         (host, port), make_handler(BillGuardApp(
             data_dir, docs_dir, llm, mcp_manager, policy_gateway, work_item_store,
-            authenticator, max_concurrent_llm,
+            authenticator, max_concurrent_llm, run_timeout,
         )),
+        max_threads=max_threads, queue_capacity=queue_capacity,
     )
     print(f"BillGuard Web UI: http://{host}:{server.server_port}")
     print("Press Ctrl+C to stop.")
@@ -816,10 +882,17 @@ def main() -> None:
                         help="Shared Work Item store used for out-of-band web approval")
     parser.add_argument("--max-concurrent-llm", type=int, default=4,
                         help="同时进行的模型调用上限,超出返回 429")
+    parser.add_argument("--run-timeout", type=float, default=120.0,
+                        help="单次 Agent 运行的总时间预算(秒),超限安全停止")
+    parser.add_argument("--max-threads", type=int, default=16,
+                        help="HTTP 工作线程池大小")
+    parser.add_argument("--queue-capacity", type=int, default=32,
+                        help="请求排队容量,超出返回 503")
     args = parser.parse_args()
     serve(args.host, args.port, args.data_dir, args.docs_dir, args.llm, args.model,
           args.base_url, args.tool_source, args.mcp_timeout, args.work_item_mcp_url,
-          args.work_item_data_dir, args.llm_proxy, args.max_concurrent_llm)
+          args.work_item_data_dir, args.llm_proxy, args.max_concurrent_llm,
+          args.run_timeout, args.max_threads, args.queue_capacity)
 
 
 if __name__ == "__main__":

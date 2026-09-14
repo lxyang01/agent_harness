@@ -196,7 +196,17 @@ class HarnessEngine:
               start_step: int, execution_summaries: list[str],
               artifact_paths: list[str], completed_tools: list[str],
               request_contract: RequestContract) -> AgentResponse:
+        started_at = time.perf_counter()
         for step in range(start_step, self.spec.max_steps + 1):
+            if (self.spec.run_timeout is not None
+                    and time.perf_counter() - started_at > self.spec.run_timeout):
+                answer = (f"已达到最大执行时间（{self.spec.run_timeout:g} 秒），"
+                          "任务被 Harness 安全停止。")
+                self._emit("run_timeout", trace_id, session_id, self.spec.run_timeout)
+                return self._finish(
+                    session, self._decorate(answer, execution_summaries, artifact_paths),
+                    step - 1, trace_id, session_id, active_skills, status="failed",
+                )
             try:
                 self._emit("model_start", trace_id, session_id, step)
                 model_started = time.perf_counter()

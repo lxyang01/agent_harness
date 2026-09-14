@@ -111,11 +111,12 @@ def build_bill_registry(service: BillService) -> ToolRegistry:
 
 def create_bill_agent(llm: LLM, session_id: str, data_dir: str | Path = ".sessions",
                       service: BillService | None = None,
-                      skill_dir: str | Path | None = None) -> HarnessEngine:
+                      skill_dir: str | Path | None = None,
+                      run_timeout: float | None = None) -> HarnessEngine:
     service = service or BillService(Path(data_dir) / "billguard")
     skill_dir = Path(skill_dir) if skill_dir is not None else Path(__file__).resolve().parents[2] / "skills"
     return HarnessEngine(
-        BILL_AGENT_SPEC,
+        replace(BILL_AGENT_SPEC, run_timeout=run_timeout),
         llm,
         build_bill_registry(service),
         SessionStore(data_dir),
@@ -127,7 +128,8 @@ def create_mcp_bill_agent(llm: LLM, session_id: str, manager: MCPClientManager,
                           data_dir: str | Path = ".sessions",
                           skill_dir: str | Path | None = None,
                           policy_gateway: PolicyGateway | None = None,
-                          registry: ToolRegistry | None = None) -> HarnessEngine:
+                          registry: ToolRegistry | None = None,
+                          run_timeout: float | None = None) -> HarnessEngine:
     """Create the bill Agent from tools dynamically advertised by MCP servers.
 
     registry 允许调用方(如 web 层)在 manager.register_tools 完成后注入
@@ -138,7 +140,7 @@ def create_mcp_bill_agent(llm: LLM, session_id: str, manager: MCPClientManager,
             manager.register_tools(registry, snapshot.name)
     if not registry.names():
         raise ValueError("no MCP tools were discovered")
-    spec = replace(BILL_AGENT_SPEC, tool_names=registry.names())
+    spec = replace(BILL_AGENT_SPEC, tool_names=registry.names(), run_timeout=run_timeout)
     skill_dir = Path(skill_dir) if skill_dir is not None else Path(__file__).resolve().parents[2] / "skills"
     return HarnessEngine(
         spec,
