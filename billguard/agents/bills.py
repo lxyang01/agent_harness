@@ -156,9 +156,18 @@ _REPORT_WORDS = ("守卫报告", "月报", "周报", "汇报")  # 强名词,与�
 _ACTION_WORDS = ("取消订阅", "取消", "退款")
 
 
+def _current_turn(messages) -> list:
+    """最近一条用户消息之后的消息:多步流程只看本轮,不串扰历史轮次。"""
+    last_user = -1
+    for index, item in enumerate(messages):
+        if item.get("role") == "user":
+            last_user = index
+    return messages[last_user:] if last_user >= 0 else messages
+
+
 def _user_intent(messages) -> str:
-    text = "|".join(str(item.get("content", "")) for item in messages
-                    if item.get("role") == "user")
+    current = _current_turn(messages)
+    text = str(current[0].get("content", "")) if current and current[0].get("role") == "user" else ""
     if any(word in text for word in _ACTION_WORDS):
         return "action"
     if any(word in text for word in _REPORT_WORDS):
@@ -175,7 +184,7 @@ def _wants_action(messages) -> bool:
 
 
 def _last_tool(messages) -> tuple[str, dict]:
-    for message in reversed(messages):
+    for message in reversed(_current_turn(messages)):
         if message.get("role") == "tool":
             name = str(message.get("name", "")).split(".")[-1]
             try:

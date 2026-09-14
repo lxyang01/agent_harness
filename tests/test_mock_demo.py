@@ -104,3 +104,18 @@ class MockActionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MultiTurnTests(unittest.TestCase):
+    def test_report_after_anomaly_chat_in_same_session(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service = BillService(Path(temp) / "bills")
+            agent = create_bill_agent(BillMockLLM(), "s1", temp,
+                                      service.for_user("alice"))
+            service.import_bills("d.csv", DEMO, owner="alice")
+            first = agent.run("s1", "有没有重复扣费")
+            self.assertEqual("completed", first.status)
+            second = agent.run("s1", "生成本月守卫报告")
+            self.assertEqual("completed", second.status, second.answer)
+            for section in ("支出事实", "异常清单", "根因推测", "行动计划"):
+                self.assertIn(section, second.answer)

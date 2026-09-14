@@ -2,7 +2,7 @@ const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 const WORKFLOW_STATUSES = ["正常", "待核查", "核查中", "已确认", "已忽略"];
 const state = {
-  session: localStorage.getItem("billguard-session") || "billguard",
+  session: localStorage.getItem("billguard-session") || "default",
   user: null, userCaps: new Set(),
   sessions: [], messages: [], overview: {}, anomalies: {items:[]}, bills: { items: [], total: 0, page: 1, page_size: 30 },
   categories: [], audits: [], imports: [], subscriptions: [], reports: [], approvals: [], mcpServers: [], runs: [], runDetail: null, evaluations: [], filters: {}, selected: new Set(), busy: false,
@@ -24,7 +24,10 @@ const ROLE_LABELS = {admin:"管理员", approver:"审批人", viewer:"观察者"
 const hasCap = (capability) => state.userCaps.has(capability);
 function showLogin() { $("#login-overlay").hidden = false; $("#login-username").focus(); }
 function hideLogin() { $("#login-overlay").hidden = true; }
+function sessionKey() { return "billguard-session-" + (state.user ? state.user.username : "anon"); }
 function applyUser(user) {
+  state.session = localStorage.getItem(sessionKey()) || (user.username + "-default");
+  localStorage.setItem(sessionKey(), state.session);
   state.user = user; state.userCaps = new Set(ROLE_CAPS[user.role] || []);
   $("#user-badge").hidden = false; $("#logout").hidden = false;
   $("#user-name").textContent = user.username;
@@ -291,11 +294,11 @@ function renderReports(){
   $("#report-list").innerHTML=state.reports.length?state.reports.map(report=>{const view=answerView(report.content);return `<article class="report-card"><div class="report-head"><div><h3>${escapeHtml(report.title)}</h3><small>${escapeHtml(formatDate(report.created_at))} · ${escapeHtml(report.session_id)}</small></div><div class="report-actions"><button data-report-action="copy" data-report-id="${report.id}" title="复制">复制</button><button data-report-action="markdown" data-report-id="${report.id}" title="导出 Markdown">MD</button><button data-report-action="print" data-report-id="${report.id}" title="打印或保存 PDF">PDF</button><button class="delete" data-delete-report="${report.id}" title="删除报告">×</button></div></div><div class="report-content ${view.structured?'structured-answer':''}">${view.html}</div></article>`;}).join(""):'<div class="report-empty">还没有守卫报告。<br>在 Agent 回答下方点击“保存为报告”。</div>';
 }
 async function loadSession(sessionId = state.session, quiet = false) {
-  state.session = String(sessionId || "").trim() || "billguard"; localStorage.setItem("billguard-session", state.session);
+  state.session = String(sessionId || "").trim() || "default"; localStorage.setItem(sessionKey(), state.session);
   try { const data = await api("/api/snapshot"); state.sessions=data.sessions||[]; state.messages=data.messages||[]; state.overview=data.overview||{}; state.anomalies=data.anomalies||{items:[]}; state.bills=data.bills||state.bills; state.categories=data.categories||[]; state.audits=data.audits||[]; state.imports=data.imports||[]; state.subscriptions=data.subscriptions||[]; state.reports=data.reports||[]; state.approvals=data.approvals||[]; state.mcpServers=data.mcp_servers||[]; state.runs=data.runs||[]; state.runDetail=null; state.evaluations=data.evaluations||[]; renderSessions(); renderMessages(); renderOverview(); renderAnomalies(); renderBills(); renderCategories(); renderImports(); renderReports(); renderApprovals(); renderRuns(); renderRunDetail(); renderEvaluations(); if(!quiet) toast(`已切换到 ${state.session}`); } catch(error) { toast(error.message); }
 }
 function createSession() { const date=new Date(); const suggested=`billguard-${date.getFullYear()}${String(date.getMonth()+1).padStart(2,"0")}${String(date.getDate()).padStart(2,"0")}`; const name=prompt("输入分析 Session 名称",suggested); if(name?.trim()){showPanel("insight");loadSession(name.trim());} }
-async function deleteSession(id) { if(!confirm(`确定删除分析 Session “${id}”吗？\n\n对话和运行记录将永久删除，账单数据库不会受影响。`))return; try{const data=await api("/api/session/delete",{session_id:id});state.sessions=data.sessions||[];if(id===state.session)await loadSession(state.sessions[0]?.id||"billguard",true);else renderSessions();toast(`已删除 ${id}`);}catch(error){toast(error.message);} }
+async function deleteSession(id) { if(!confirm(`确定删除分析 Session “${id}”吗？\n\n对话和运行记录将永久删除，账单数据库不会受影响。`))return; try{const data=await api("/api/session/delete",{session_id:id});state.sessions=data.sessions||[];if(id===state.session)await loadSession(state.sessions[0]?.id||"default",true);else renderSessions();toast(`已删除 ${id}`);}catch(error){toast(error.message);} }
 async function send(text) {
   const message=String(text||$("#message").value).trim();if(!message||state.busy)return;showPanel("insight");state.messages.push({role:"user",content:message});renderMessages();$("#messages").insertAdjacentHTML("beforeend",'<div class="message assistant loading"><div><div class="bubble">正在查询账单数据…</div><div class="meta">BillGuard 账单守卫</div></div></div>');$("#message").value="";state.busy=true;$("#send").disabled=true;window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"});
   try{const data=await api("/api/chat",{message});$(".loading")?.remove();state.messages.push({role:"assistant",content:data.answer,evidence:data.evidence||[]});state.sessions=data.sessions||state.sessions;state.overview=data.overview||state.overview;state.approvals=data.approvals||state.approvals;state.mcpServers=data.mcp_servers||state.mcpServers;state.runs=data.runs||state.runs;renderMessages();renderSessions();renderOverview();renderApprovals();renderRuns();if(data.status==="approval_pending"){showPanel("approvals");toast("Agent 已暂停，请检查并审批高风险操作");}else{toast(`分析完成 · ${data.steps} 步`);}}catch(error){$(".loading .bubble").textContent=`分析失败：${error.message}`;}finally{state.busy=false;$("#send").disabled=false;$("#message").focus();}
