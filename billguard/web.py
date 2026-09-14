@@ -236,11 +236,31 @@ class BillGuardApp:
             "evaluations": self.evaluations.list(),
         }
 
+    def _enrich_approval(self, data: dict[str, Any]) -> dict[str, Any]:
+        """commit 类审批的参数只有 approval_id;回查工单补全人可读的操作内容。"""
+        if (self.work_item_store is None
+                or not str(data.get("tool_name", "")).endswith("commit_issue")):
+            return data
+        remote_id = str((data.get("arguments") or {}).get("approval_id", "")).strip()
+        if not remote_id:
+            return data
+        try:
+            payload = self.work_item_store.approval(remote_id).get("payload") or {}
+        except Exception:
+            return data
+        data.setdefault("action_title", payload.get("title", ""))
+        data.setdefault("action_description", payload.get("description", ""))
+        priority = payload.get("priority", "")
+        data.setdefault("action_priority",
+                        {"high": "高", "medium": "中", "low": "低"}.get(priority, priority))
+        return data
+
     def approvals(self, user: Any, session_id: str) -> list[dict[str, Any]]:
         self._require_session_access(user, session_id)
         if self.policy_gateway is None:
             return []
-        return [item.as_dict() for item in self.policy_gateway.store.list(session_id=session_id)]
+        return [self._enrich_approval(item.as_dict())
+                for item in self.policy_gateway.store.list(session_id=session_id)]
 
     def mcp_servers(self) -> list[dict[str, Any]]:
         if self.mcp_manager is None:
@@ -309,7 +329,8 @@ class BillGuardApp:
                 "evidence": evidence,
                 "mcp_servers": self.mcp_servers(),
                 "status": response.status,
-                "approval": response.approval,
+                "approval": self._enrich_approval(response.approval)
+                    if isinstance(response.approval, dict) else response.approval,
                 "approvals": self.approvals(user, session_id),
                 "runs": self.traces.list_runs(session_id),
             }
@@ -393,7 +414,8 @@ class BillGuardApp:
                 "steps": response.steps,
                 "trace_id": response.trace_id,
                 "status": response.status,
-                "approval": self.policy_gateway.store.get(decided.id).as_dict(),
+                "approval": self._enrich_approval(
+                    self.policy_gateway.store.get(decided.id).as_dict()),
                 "approvals": self.approvals(user, session_id),
                 "sessions": self.list_sessions(user, session_id),
                 "overview": self._scoped(user).overview(),

@@ -119,3 +119,63 @@ class MultiTurnTests(unittest.TestCase):
             self.assertEqual("completed", second.status, second.answer)
             for section in ("支出事实", "异常清单", "根因推测", "行动计划"):
                 self.assertIn(section, second.answer)
+
+
+class ApprovalContextTests(unittest.TestCase):
+    def test_commit_pause_carries_work_item_context(self):
+        """commit_issue 暂停时,审批数据应回查工单补全标题/说明,供人做决定。"""
+        from types import SimpleNamespace
+        from billguard.auth import User
+        from billguard.policy import ApprovalStore, PolicyGateway, ToolPolicy
+        from billguard.tools import Tool, ToolRegistry
+        from billguard.web import BillGuardApp
+        from billguard.work_items import WorkItemStore
+
+        class _Manager:
+            def __init__(self, store):
+                self.store = store
+
+            def snapshots(self):
+                return [SimpleNamespace(name="work-items", transport="t", server_name="t",
+                                        server_version="t", protocol_version="t",
+                                        tools=(), resources=(), prompts=())]
+
+            def register_tools(self, registry, name):
+                registry.register(Tool(
+                    "bill_overview", "O", {"type": "object", "properties": {},
+                                           "required": [], "additionalProperties": False},
+                    lambda **kw: {"count": 1, "total_amount": 25.0, "pending": 0,
+                                  "by_category": [], "top_merchants": []},
+                    policy=ToolPolicy("read", False, "o")))
+                registry.register(Tool(
+                    "work-items.prepare_issue", "P",
+                    {"type": "object",
+                     "properties": {"title": {"type": "string"},
+                                    "description": {"type": "string"},
+                                    "priority": {"type": "string"}},
+                     "required": ["title", "description", "priority"],
+                     "additionalProperties": False},
+                    self.store.prepare_issue, policy=ToolPolicy("read", False, "p")))
+                registry.register(Tool(
+                    "work-items.commit_issue", "C",
+                    {"type": "object", "properties": {"approval_id": {"type": "string"}},
+                     "required": ["approval_id"], "additionalProperties": False},
+                    self.store.commit_issue, policy=ToolPolicy("high_write", True, "c")))
+                return registry.names()
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            work_items = WorkItemStore(root / "wi")
+            gateway = PolicyGateway(ApprovalStore(root / "policy"))
+            app = BillGuardApp(root / "web", root / "docs", BillMockLLM(),
+                               _Manager(work_items), gateway, work_items)
+            alice = User("alice", "user")
+            app.import_bills(alice, {"filename": "d.csv", "csv_text": DEMO})
+
+            paused = app.chat(alice, "s1", "帮我取消腾讯视频订阅")
+
+            self.assertEqual("approval_pending", paused["status"])
+            approval = paused["approval"]
+            self.assertEqual("取消腾讯视频订阅", approval.get("action_title"))
+            self.assertIn("取消", approval.get("action_description", ""))
+            self.assertEqual("高", approval.get("action_priority"))
