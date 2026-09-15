@@ -10,11 +10,16 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 from billguard.auth import User
-from billguard.policy import ApprovalStore, PolicyError, PolicyGateway, ToolPolicy
-from billguard.session import SessionStore
+from billguard.coordination import LockedError
+from billguard.policy import PolicyError, PolicyGateway, ToolPolicy
+from billguard.storage_pg import (
+    PGApprovalStore, PGSessionStore, PGWorkItemStore,
+)
 from billguard.tools import Tool, ToolRegistry
 from billguard.web import BusyError, BillGuardApp
-from billguard.work_items import WorkItemError, WorkItemStore
+from billguard.work_items import WorkItemError
+
+from tests.conftest import StoreTestCase
 
 
 def run_threaded(count: int, target: Callable[[], Any]) -> tuple[list[Any], list[Exception]]:
@@ -38,32 +43,30 @@ def run_threaded(count: int, target: Callable[[], Any]) -> tuple[list[Any], list
     return results, errors
 
 
-class ApprovalStoreRaceTests(unittest.TestCase):
+class ApprovalStoreRaceTests(StoreTestCase):
     def test_concurrent_decide_yields_exactly_one_winner(self):
-        with tempfile.TemporaryDirectory() as temp:
-            store = ApprovalStore(Path(temp))
-            approval = store.request("s", "t", 1, "tool.x", {},
-                                     ToolPolicy("high_write", True, "race probe"), {})
-            results, errors = run_threaded(
-                8, lambda: store.decide(approval.id, True, "alice", "note"))
-            self.assertEqual(1, len(results), f"winners={len(results)}")
-            self.assertEqual(7, len(errors))
-            for exc in errors:
-                self.assertIsInstance(exc, PolicyError)
-            self.assertEqual("approved", store.get(approval.id).status)
+        store = PGApprovalStore(self.pool)
+        approval = store.request("s", "t", 1, "tool.x", {},
+                                 ToolPolicy("high_write", True, "race probe"), {})
+        results, errors = run_threaded(
+            8, lambda: store.decide(approval.id, True, "alice", "note"))
+        self.assertEqual(1, len(results), f"winners={len(results)}")
+        self.assertEqual(7, len(errors))
+        for exc in errors:
+            self.assertIsInstance(exc, PolicyError)
+        self.assertEqual("approved", store.get(approval.id).status)
 
 
-class WorkItemStoreRaceTests(unittest.TestCase):
+class WorkItemStoreRaceTests(StoreTestCase):
     def test_concurrent_decide_yields_exactly_one_winner(self):
-        with tempfile.TemporaryDirectory() as temp:
-            store = WorkItemStore(Path(temp))
-            remote = store.prepare_issue("Fix checkout", "desc", "high")
-            results, errors = run_threaded(
-                8, lambda: store.decide(remote["approval_id"], True, "alice"))
-            self.assertEqual(1, len(results), f"winners={len(results)}")
-            self.assertEqual(7, len(errors))
-            for exc in errors:
-                self.assertIsInstance(exc, WorkItemError)
+        store = PGWorkItemStore(self.pool)
+        remote = store.prepare_issue("Fix checkout", "desc", "high")
+        results, errors = run_threaded(
+            8, lambda: store.decide(remote["approval_id"], True, "alice"))
+        self.assertEqual(1, len(results), f"winners={len(results)}")
+        self.assertEqual(7, len(errors))
+        for exc in errors:
+            self.assertIsInstance(exc, WorkItemError)
 
 
 class _SlowScriptedLLM:
@@ -110,15 +113,22 @@ class _CommitManager:
         return registry.names()
 
 
-class SessionLockRaceTests(unittest.TestCase):
+class SessionLockRaceTests(StoreTestCase):
+    """分布式契约(spec §4.1):同一会话的并发操作不再排队等待,
+    而是后来者立刻拿到 LockedError(HTTP 层 423);顺序执行仍须保证
+    慢速 chat 与审批恢复的会话更新都不丢失。"""
+
     def test_concurrent_chat_and_approval_do_not_lose_session_updates(self):
+        from billguard.storage_pg import (
+            PGBillService, PGEvidenceStore, PGTraceStore,
+        )
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            work_items = WorkItemStore(root / "work-items")
+            work_items = PGWorkItemStore(self.pool)
             remote = work_items.prepare_issue("Fix checkout", "desc", "high")
             in_flight = threading.Event()
             llm = _SlowScriptedLLM(remote["approval_id"], in_flight)
-            gateway = PolicyGateway(ApprovalStore(root / "web" / "policy"))
+            gateway = PolicyGateway(PGApprovalStore(self.pool))
 
             manager = _CommitManager()
             manager_store = work_items
@@ -127,14 +137,19 @@ class SessionLockRaceTests(unittest.TestCase):
                 registry, name, store=manager_store)
 
             app = BillGuardApp(root / "web", root / "docs", llm, manager,
-                               gateway, work_items)
+                               gateway, work_items,
+                               bills=PGBillService(self.pool),
+                               session_store=PGSessionStore(self.pool),
+                               evidence_store=PGEvidenceStore(self.pool),
+                               trace_store=PGTraceStore(self.pool),
+                               redis_client=self.redis)
             alice = User("alice", "user")
 
             # 准备:第一次 chat 触发 high_write 暂停,产生 pending 审批
             paused = app.chat(alice, "s", "$monthly-guard-report create issue")
             self.assertEqual("approval_pending", paused["status"])
 
-            # 并发:慢速 chat 与审批恢复同时在同一 session 上运行
+            # 并发:慢速 chat 持 Redis 会话锁期间,同会话审批恢复被拒(423 契约)
             chat_result: dict[str, Any] = {}
 
             def run_chat() -> None:
@@ -147,14 +162,20 @@ class SessionLockRaceTests(unittest.TestCase):
             thread = threading.Thread(target=run_chat)
             thread.start()
             self.assertTrue(in_flight.wait(timeout=5))  # chat 已持锁、模型睡眠中
+            # 原单进程语义:decide 排队等待 chat 完成;分布式语义:立即 LockedError
+            with self.assertRaises(LockedError):
+                app.decide_approval(alice, "s", {
+                    "approval_id": paused["approval"]["id"], "decision": "approve"})
+            thread.join(timeout=10)
+
+            # 顺序路径:chat 结束(锁释放)后审批恢复可继续,两边结果都不丢
             decision = app.decide_approval(alice, "s", {
                 "approval_id": paused["approval"]["id"], "decision": "approve"})
-            thread.join(timeout=10)
 
             self.assertIsNone(chat_result.get("error"))
             self.assertEqual("completed", chat_result["response"]["status"])
             self.assertEqual("completed", decision["status"])
-            session = SessionStore(root / "web" / "billguard" / "sessions").load("s")
+            session = PGSessionStore(self.pool).load("s")
             contents = [message.content for message in session.messages]
             self.assertTrue(any("慢速回答" in content for content in contents),
                             f"chat 结果丢失: {contents}")
@@ -190,13 +211,21 @@ class _BillReadManager:
         return registry.names()
 
 
-class LlmSemaphoreTests(unittest.TestCase):
+class LlmSemaphoreTests(StoreTestCase):
     def test_over_limit_chat_gets_busy_error(self):
+        from billguard.storage_pg import (
+            PGBillService, PGEvidenceStore, PGTraceStore,
+        )
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             llm = _BlockingLLM()
             app = BillGuardApp(root / "web", root / "docs", llm, _BillReadManager(),
-                               max_concurrent_llm=1)
+                               max_concurrent_llm=1,
+                               bills=PGBillService(self.pool),
+                               session_store=PGSessionStore(self.pool),
+                               evidence_store=PGEvidenceStore(self.pool),
+                               trace_store=PGTraceStore(self.pool),
+                               redis_client=self.redis)
             alice = User("alice", "user")
             result: dict[str, Any] = {}
 
@@ -217,11 +246,8 @@ class LlmSemaphoreTests(unittest.TestCase):
             self.assertEqual("completed", result["response"]["status"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TaskFileAtomicityTests(unittest.TestCase):
+    # TaskService 为文件型工具服务(无 PG 对应物,见 F5 范围),保留文件机制测试
     def test_concurrent_task_writes_never_expose_partial_file(self):
         from billguard.tools import TaskService
         with tempfile.TemporaryDirectory() as temp:
@@ -258,3 +284,7 @@ class TaskFileAtomicityTests(unittest.TestCase):
                 thread.join(timeout=5)
             self.assertEqual([], errors)
             self.assertGreaterEqual(len(tasks.list("s1")["tasks"]), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

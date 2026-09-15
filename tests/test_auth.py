@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -12,10 +13,10 @@ from billguard.auth import (
     AuthSessionStore, Authenticator, clear_session_cookie,
     session_cookie, session_token_from_cookie,
 )
+from billguard.coordination import RedisAuthSessions
+from billguard.storage_pg import PGUserStore
 
-
-def store(root: Path) -> UserStore:
-    return UserStore(root / "auth")
+from tests.conftest import StoreTestCase, token_key
 
 
 class UserValidationTests(unittest.TestCase):
@@ -51,78 +52,76 @@ class CapabilityMatrixTests(unittest.TestCase):
         self.assertFalse(can("admin", "bills_write_legacy"))  # 未定义能力一律拒绝
 
 
-class UserStoreTests(unittest.TestCase):
+class UserStoreTests(StoreTestCase):
+    def store(self) -> PGUserStore:
+        return PGUserStore(self.pool)
+
     def test_create_verify_and_wrong_password(self):
-        with tempfile.TemporaryDirectory() as temp:
-            users = store(Path(temp))
-            created = users.create("alice", "alice-pass-123", "user")
-            self.assertEqual("alice", created.username)
-            self.assertEqual("user", created.role)
-            self.assertEqual(1, users.count())
-            self.assertEqual(users.get("alice"), created)
-            verified = users.verify("alice", "alice-pass-123")
-            self.assertEqual("user", verified.role)
-            with self.assertRaises(AuthError):
-                users.verify("alice", "wrong-pass-123")
-            with self.assertRaises(AuthError):
-                users.verify("nobody", "alice-pass-123")
+        users = self.store()
+        created = users.create("alice", "alice-pass-123", "user")
+        self.assertEqual("alice", created.username)
+        self.assertEqual("user", created.role)
+        self.assertEqual(1, users.count())
+        self.assertEqual(users.get("alice"), created)
+        verified = users.verify("alice", "alice-pass-123")
+        self.assertEqual("user", verified.role)
+        with self.assertRaises(AuthError):
+            users.verify("alice", "wrong-pass-123")
+        with self.assertRaises(AuthError):
+            users.verify("nobody", "alice-pass-123")
 
     def test_duplicate_and_invalid_create(self):
-        with tempfile.TemporaryDirectory() as temp:
-            users = store(Path(temp))
-            users.create("alice", "alice-pass-123", "user")
-            with self.assertRaises(AuthError):
-                users.create("alice", "other-pass-123", "user")
-            with self.assertRaises(AuthError):
-                users.create("Bob", "bob-pass-1234", "user")
-            with self.assertRaises(AuthError):
-                users.create("bob", "short", "user")
-            with self.assertRaises(AuthError):
-                users.create("bob", "bob-pass-1234", "boss")
+        users = self.store()
+        users.create("alice", "alice-pass-123", "user")
+        with self.assertRaises(AuthError):
+            users.create("alice", "other-pass-123", "user")
+        with self.assertRaises(AuthError):
+            users.create("Bob", "bob-pass-1234", "user")
+        with self.assertRaises(AuthError):
+            users.create("bob", "short", "user")
+        with self.assertRaises(AuthError):
+            users.create("bob", "bob-pass-1234", "boss")
 
     def test_password_hash_not_plaintext(self):
-        with tempfile.TemporaryDirectory() as temp:
-            users = store(Path(temp))
-            users.create("alice", "alice-pass-123", "user")
-            import sqlite3
-            conn = sqlite3.connect(users.db_path)
-            row = conn.execute(
-                "SELECT password_hash, salt FROM users WHERE username='alice'").fetchone()
-            conn.close()  # Windows：显式关闭，否则临时目录清理时 auth.db 仍被占用
-            self.assertNotIn("alice-pass-123", row)
+        users = self.store()
+        users.create("alice", "alice-pass-123", "user")
+        # 原断言读 SQLite auth.db 文件(文件机制);PG 等价可观察量:
+        # 直接读 users 行的 password_hash/salt,证明库中无明文密码
+        with self.pool.connection() as db:
+            row = db.execute(
+                "SELECT password_hash, salt FROM users WHERE username = 'alice'").fetchone()
+        self.assertIsNotNone(row)
+        self.assertNotIn("alice-pass-123", f"{row['password_hash']}{row['salt']}")
 
     def test_set_role_and_last_admin_guard(self):
-        with tempfile.TemporaryDirectory() as temp:
-            users = store(Path(temp))
-            users.create("root", "root-pass-1234", "admin")
-            users.create("alice", "alice-pass-123", "admin")
-            self.assertEqual("user", users.set_role("alice", "user").role)
-            with self.assertRaises(AuthError):  # 最后一个启用中的 admin 不可降级
-                users.set_role("root", "user")
-            users.create("bob", "bob-pass-1234", "admin")
-            users.set_role("root", "user")  # 有其他 admin 时允许
+        users = self.store()
+        users.create("root", "root-pass-1234", "admin")
+        users.create("alice", "alice-pass-123", "admin")
+        self.assertEqual("user", users.set_role("alice", "user").role)
+        with self.assertRaises(AuthError):  # 最后一个启用中的 admin 不可降级
+            users.set_role("root", "user")
+        users.create("bob", "bob-pass-1234", "admin")
+        users.set_role("root", "user")  # 有其他 admin 时允许
 
     def test_disable_guards(self):
-        with tempfile.TemporaryDirectory() as temp:
-            users = store(Path(temp))
-            users.create("root", "root-pass-1234", "admin")
-            users.create("alice", "alice-pass-123", "user")
-            self.assertTrue(users.set_disabled("alice", True).disabled)
-            with self.assertRaises(AuthError):  # 最后一个启用的 admin 不可禁用
-                users.set_disabled("root", True)
-            with self.assertRaises(AuthError):
-                users.verify("alice", "alice-pass-123")  # 禁用用户登录失败
-            users.set_disabled("alice", False)
-            self.assertEqual("user", users.verify("alice", "alice-pass-123").role)
+        users = self.store()
+        users.create("root", "root-pass-1234", "admin")
+        users.create("alice", "alice-pass-123", "user")
+        self.assertTrue(users.set_disabled("alice", True).disabled)
+        with self.assertRaises(AuthError):  # 最后一个启用的 admin 不可禁用
+            users.set_disabled("root", True)
+        with self.assertRaises(AuthError):
+            users.verify("alice", "alice-pass-123")  # 禁用用户登录失败
+        users.set_disabled("alice", False)
+        self.assertEqual("user", users.verify("alice", "alice-pass-123").role)
 
     def test_reset_password(self):
-        with tempfile.TemporaryDirectory() as temp:
-            users = store(Path(temp))
-            users.create("alice", "alice-pass-123", "user")
-            users.reset_password("alice", "new-pass-12345")
-            with self.assertRaises(AuthError):
-                users.verify("alice", "alice-pass-123")
-            self.assertEqual("user", users.verify("alice", "new-pass-12345").role)
+        users = self.store()
+        users.create("alice", "alice-pass-123", "user")
+        users.reset_password("alice", "new-pass-12345")
+        with self.assertRaises(AuthError):
+            users.verify("alice", "alice-pass-123")
+        self.assertEqual("user", users.verify("alice", "new-pass-12345").role)
 
 
 class FakeHeaders:
@@ -133,76 +132,73 @@ class FakeHeaders:
         return self.cookie if name.lower() == "cookie" else default
 
 
-class AuthSessionTests(unittest.TestCase):
+class AuthSessionTests(StoreTestCase):
+    """登录会话走 Redis(RedisAuthSessions):分布式模式的会话后端。"""
+
+    def sessions(self) -> RedisAuthSessions:
+        return RedisAuthSessions(self.redis)
+
+    def users(self) -> PGUserStore:
+        return PGUserStore(self.pool)
+
     def test_token_roundtrip_and_hashed_storage(self):
-        with tempfile.TemporaryDirectory() as temp:
-            sessions = AuthSessionStore(Path(temp) / "auth")
-            token = sessions.create("alice")
-            self.assertNotIn(token[:8], sqlite3_text(Path(temp) / "auth" / "auth.db"))
-            self.assertEqual("alice", sessions.consume(token))
-            self.assertEqual("alice", sessions.consume(token))  # 可重复使用
+        sessions = self.sessions()
+        token = sessions.create("alice")
+        # 原断言读 SQLite auth.db 的 token_hash(文件机制);Redis 等价可观察量:
+        # 键为 token 的 sha256 摘要(auth:token:<hash>),原 token 不落任何键名
+        self.assertTrue(self.redis.exists(token_key(token)))
+        self.assertEqual([], list(self.redis.scan_iter(match=f"*{token}*")))
+        self.assertEqual("alice", sessions.resolve(token))
+        self.assertEqual("alice", sessions.resolve(token))  # 可重复使用
 
     def test_logout_invalidates(self):
-        with tempfile.TemporaryDirectory() as temp:
-            sessions = AuthSessionStore(Path(temp) / "auth")
-            token = sessions.create("alice")
-            sessions.delete(token)
-            self.assertIsNone(sessions.consume(token))
+        sessions = self.sessions()
+        token = sessions.create("alice")
+        sessions.delete(token)
+        self.assertIsNone(sessions.resolve(token))
 
     def test_expired_token_rejected(self):
-        with tempfile.TemporaryDirectory() as temp:
-            sessions = AuthSessionStore(Path(temp) / "auth")
-            token = sessions.create("alice", ttl_days=-1)  # 构造已过期
-            self.assertIsNone(sessions.consume(token))
+        sessions = self.sessions()
+        token = sessions.create("alice")
+        # 原断言以 ttl_days=-1 构造已过期(SQLite 可写过去时间戳);Redis 的
+        # ex 不接受负值,等价可观察量:把键 TTL 压到 60ms 后等待其自然过期
+        self.redis.pexpire(token_key(token), 60)
+        time.sleep(0.1)
+        self.assertIsNone(sessions.resolve(token))
 
     def test_resolve_requires_cookie_and_checks_user(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp) / "auth"
-            users = UserStore(root)
-            users.create("alice", "alice-pass-123", "user")
-            auth = Authenticator(users, AuthSessionStore(root))
-            with self.assertRaises(AuthError):
-                auth.resolve_user(FakeHeaders(""))
-            user, token = auth.login("alice", "alice-pass-123")
-            self.assertEqual("alice", user.username)
-            resolved = auth.resolve_user(FakeHeaders(f"other=1; session={token}"))
-            self.assertEqual("alice", resolved.username)
-            users.set_disabled("alice", True)
-            with self.assertRaises(AuthError):  # 禁用后存量会话立即失效
-                auth.resolve_user(FakeHeaders(f"session={token}"))
+        users = self.users()
+        users.create("alice", "alice-pass-123", "user")
+        auth = Authenticator(users, self.sessions())
+        with self.assertRaises(AuthError):
+            auth.resolve_user(FakeHeaders(""))
+        user, token = auth.login("alice", "alice-pass-123")
+        self.assertEqual("alice", user.username)
+        resolved = auth.resolve_user(FakeHeaders(f"other=1; session={token}"))
+        self.assertEqual("alice", resolved.username)
+        users.set_disabled("alice", True)
+        with self.assertRaises(AuthError):  # 禁用后存量会话立即失效
+            auth.resolve_user(FakeHeaders(f"session={token}"))
 
     def test_logout_and_cookie_helpers(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp) / "auth"
-            users = UserStore(root)
-            users.create("alice", "alice-pass-123", "user")
-            auth = Authenticator(users, AuthSessionStore(root))
-            _, token = auth.login("alice", "alice-pass-123")
-            self.assertEqual(token, session_token_from_cookie(
-                f"session={token}; other=x"))
-            self.assertIn("HttpOnly", session_cookie(token))
-            self.assertIn("Max-Age=0", clear_session_cookie())
-            auth.logout(FakeHeaders(f"session={token}"))
-            with self.assertRaises(AuthError):
-                auth.resolve_user(FakeHeaders(f"session={token}"))
-
-
-def sqlite3_text(path: Path) -> str:
-    import sqlite3
-    connection = sqlite3.connect(path)
-    try:
-        rows = connection.execute("SELECT token_hash FROM auth_sessions").fetchall()
-    finally:
-        connection.close()
-    return " ".join(row[0] for row in rows)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.users().create("alice", "alice-pass-123", "user")
+        auth = Authenticator(self.users(), self.sessions())
+        _, token = auth.login("alice", "alice-pass-123")
+        self.assertEqual(token, session_token_from_cookie(
+            f"session={token}; other=x"))
+        self.assertIn("HttpOnly", session_cookie(token))
+        self.assertIn("Max-Age=0", clear_session_cookie())
+        auth.logout(FakeHeaders(f"session={token}"))
+        with self.assertRaises(AuthError):
+            auth.resolve_user(FakeHeaders(f"session={token}"))
 
 
 class PasswordResetTests(unittest.TestCase):
     def test_password_reset_invalidates_existing_sessions(self):
+        # 单进程契约(UserStore+AuthSessionStore 文件版):改密联动清理服务端会话。
+        # 分布式后端(PGUserStore+RedisAuthSessions)按 T1/T2 决策不做联动
+        # (storage_pg 注释:PG schema 无 auth_sessions 表),本语义仅由
+        # 单进程路径保障,故保留文件版构造(见任务报告 concerns)。
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "auth"
             users = UserStore(root)
@@ -213,3 +209,7 @@ class PasswordResetTests(unittest.TestCase):
             users.reset_password("alice", "new-pass-12345")
             with self.assertRaises(AuthError):
                 auth.resolve_user(FakeHeaders(f"session={token}"))
+
+
+if __name__ == "__main__":
+    unittest.main()

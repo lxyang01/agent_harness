@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
 import sys
 from pathlib import Path
 
@@ -17,9 +18,20 @@ def _read_password(args: argparse.Namespace, confirm: bool) -> str:
     return first
 
 
-def _store(args: argparse.Namespace) -> UserStore:
+def _store(args: argparse.Namespace) -> tuple[UserStore, "object | None"]:
+    """存储工厂(与 MCP 服务器同款 F6 约定):
+
+    设置 BILLGUARD_PG_DSN 时走 PGUserStore(进程级连接池,由 main 负责
+    用后关闭);否则保持单进程 UserStore(<data-dir>/billguard/auth)不变。
+    返回 (store, pool),pool 仅 PG 分支非 None。
+    """
+    dsn = os.environ.get("BILLGUARD_PG_DSN")
+    if dsn:
+        from .storage_pg import PGUserStore, new_pg_pool
+        pool = new_pg_pool(dsn)
+        return PGUserStore(pool), pool
     # 与 web.serve() 保持同一子树:<data-dir>/billguard/auth
-    return UserStore(Path(args.data_dir) / "billguard" / "auth")
+    return UserStore(Path(args.data_dir) / "billguard" / "auth"), None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     enable.add_argument("username")
 
     args = parser.parse_args(argv)
-    store = _store(args)
+    store, pool = _store(args)
     try:
         if args.command == "add":
             store.create(args.username, _read_password(args, confirm=True), args.role)
@@ -74,6 +86,9 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:  # AuthError 继承 ValueError
         print(f"错误:{exc}", file=sys.stderr)
         return 1
+    finally:
+        if pool is not None:
+            pool.close()  # PG 分支:CLI 一次性进程,用后即关
     return 0
 
 

@@ -8,12 +8,16 @@ from types import SimpleNamespace
 
 from billguard.auth import User
 from billguard.harness import AgentSpec, HarnessEngine
-from billguard.policy import ApprovalStore, PolicyError, PolicyGateway, ToolPolicy
-from billguard.session import SessionStore
+from billguard.policy import PolicyError, PolicyGateway, ToolPolicy
 from billguard.skills import SkillRuntime
+from billguard.storage_pg import (
+    PGApprovalStore, PGBillService, PGEvidenceStore, PGSessionStore,
+    PGTraceStore, PGWorkItemStore,
+)
 from billguard.tools import Tool, ToolRegistry
 from billguard.web import BillGuardApp
-from billguard.work_items import WorkItemStore
+
+from tests.conftest import StoreTestCase
 
 
 class QueueLLM:
@@ -43,7 +47,16 @@ def high_risk_registry(handler) -> ToolRegistry:
     return registry
 
 
-class PolicyHarnessTests(unittest.TestCase):
+class PolicyHarnessTests(StoreTestCase):
+    """HarnessEngine 会话/审批走 PG(PGSessionStore + PGApprovalStore;
+    trace_writer 注入 PGTraceStore,否则引擎回退 TraceLogger(sessions.root))。"""
+
+    def sessions(self) -> PGSessionStore:
+        return PGSessionStore(self.pool)
+
+    def traces(self) -> PGTraceStore:
+        return PGTraceStore(self.pool)
+
     def test_completion_contract_blocks_early_final_until_required_write_is_proposed(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -89,12 +102,13 @@ class PolicyHarnessTests(unittest.TestCase):
                 {"thought": "commit", "tool_call": {"name": "commit", "arguments": {}}},
                 {"thought": "done", "final": "issue created"},
             ])
-            gateway = PolicyGateway(ApprovalStore(root / "policy"))
+            gateway = PolicyGateway(PGApprovalStore(self.pool))
             events = []
             engine = HarnessEngine(
                 AgentSpec("completion-test", "Complete the request.", ("prepare", "commit"), 6),
-                llm, registry, SessionStore(root / "sessions"),
+                llm, registry, self.sessions(),
                 skills=SkillRuntime(skill_root), policy_gateway=gateway, hooks=[events.append],
+                trace_writer=self.traces(),
             )
 
             paused = engine.run("completion-session", "创建跟进工单")
@@ -110,65 +124,62 @@ class PolicyHarnessTests(unittest.TestCase):
             self.assertEqual(["prepare", "commit"], calls)
 
     def test_high_risk_tool_pauses_and_resumes_after_process_reconstruction(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            calls: list[str] = []
-            llm = QueueLLM([
-                {"thought": "write", "tool_call": {"name": "danger.write", "arguments": {"value": "A"}}},
-                {"thought": "done", "final": "write completed"},
-            ])
-            spec = AgentSpec("policy-test", "Use the tool.", ("danger.write",), max_steps=4)
-            gateway = PolicyGateway(ApprovalStore(root / "policy"))
-            sessions = SessionStore(root / "sessions")
+        calls: list[str] = []
+        llm = QueueLLM([
+            {"thought": "write", "tool_call": {"name": "danger.write", "arguments": {"value": "A"}}},
+            {"thought": "done", "final": "write completed"},
+        ])
+        spec = AgentSpec("policy-test", "Use the tool.", ("danger.write",), max_steps=4)
+        gateway = PolicyGateway(PGApprovalStore(self.pool))
+        sessions = self.sessions()
 
-            first_engine = HarnessEngine(
-                spec, llm, high_risk_registry(lambda value: calls.append(value) or {"saved": value}),
-                sessions, policy_gateway=gateway,
-            )
-            paused = first_engine.run("s-1", "save A")
+        first_engine = HarnessEngine(
+            spec, llm, high_risk_registry(lambda value: calls.append(value) or {"saved": value}),
+            sessions, policy_gateway=gateway, trace_writer=self.traces(),
+        )
+        paused = first_engine.run("s-1", "save A")
 
-            self.assertEqual("approval_pending", paused.status)
-            self.assertEqual([], calls)
-            self.assertEqual("pending", gateway.store.get(paused.approval["id"]).status)
-            self.assertEqual(["user"], [message.role for message in sessions.load("s-1").messages])
+        self.assertEqual("approval_pending", paused.status)
+        self.assertEqual([], calls)
+        self.assertEqual("pending", gateway.store.get(paused.approval["id"]).status)
+        self.assertEqual(["user"], [message.role for message in sessions.load("s-1").messages])
 
-            gateway.store.decide(paused.approval["id"], True, "tester", "verified")
-            restarted_engine = HarnessEngine(
-                spec, llm, high_risk_registry(lambda value: calls.append(value) or {"saved": value}),
-                sessions, policy_gateway=PolicyGateway(ApprovalStore(root / "policy")),
-            )
-            completed = restarted_engine.resume(paused.approval["id"])
+        gateway.store.decide(paused.approval["id"], True, "tester", "verified")
+        restarted_engine = HarnessEngine(
+            spec, llm, high_risk_registry(lambda value: calls.append(value) or {"saved": value}),
+            sessions, policy_gateway=PolicyGateway(PGApprovalStore(self.pool)),
+            trace_writer=self.traces(),
+        )
+        completed = restarted_engine.resume(paused.approval["id"])
 
-            self.assertEqual("completed", completed.status)
-            self.assertEqual("write completed", completed.answer)
-            self.assertEqual(["A"], calls)
-            self.assertEqual("executed", gateway.store.get(paused.approval["id"]).status)
-            self.assertEqual(1, sum(message.role == "user" for message in sessions.load("s-1").messages))
+        self.assertEqual("completed", completed.status)
+        self.assertEqual("write completed", completed.answer)
+        self.assertEqual(["A"], calls)
+        self.assertEqual("executed", gateway.store.get(paused.approval["id"]).status)
+        self.assertEqual(1, sum(message.role == "user" for message in sessions.load("s-1").messages))
 
     def test_rejection_finishes_without_executing_tool(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            calls: list[str] = []
-            gateway = PolicyGateway(ApprovalStore(root / "policy"))
-            engine = HarnessEngine(
-                AgentSpec("policy-test", "Use the tool.", ("danger.write",)),
-                QueueLLM([{"tool_call": {"name": "danger.write", "arguments": {"value": "B"}}}]),
-                high_risk_registry(lambda value: calls.append(value)),
-                SessionStore(root / "sessions"), policy_gateway=gateway,
-            )
-            paused = engine.run("s-2", "save B")
-            gateway.store.decide(paused.approval["id"], False, "reviewer", "not allowed")
-            rejected = engine.finalize_rejection(paused.approval["id"])
+        calls: list[str] = []
+        gateway = PolicyGateway(PGApprovalStore(self.pool))
+        engine = HarnessEngine(
+            AgentSpec("policy-test", "Use the tool.", ("danger.write",)),
+            QueueLLM([{"tool_call": {"name": "danger.write", "arguments": {"value": "B"}}}]),
+            high_risk_registry(lambda value: calls.append(value)),
+            self.sessions(), policy_gateway=gateway, trace_writer=self.traces(),
+        )
+        paused = engine.run("s-2", "save B")
+        gateway.store.decide(paused.approval["id"], False, "reviewer", "not allowed")
+        rejected = engine.finalize_rejection(paused.approval["id"])
 
-            self.assertEqual("rejected", rejected.status)
-            self.assertEqual([], calls)
-            self.assertIn("danger.write", rejected.answer)
-            with self.assertRaises(PolicyError):
-                engine.resume(paused.approval["id"])
+        self.assertEqual("rejected", rejected.status)
+        self.assertEqual([], calls)
+        self.assertIn("danger.write", rejected.answer)
+        with self.assertRaises(PolicyError):
+            engine.resume(paused.approval["id"])
 
 
 class FakeWorkItemManager:
-    def __init__(self, store: WorkItemStore) -> None:
+    def __init__(self, store) -> None:
         self.store = store
 
     def snapshots(self):
@@ -192,11 +203,11 @@ class FakeWorkItemManager:
         return registry.names()
 
 
-class WebApprovalTests(unittest.TestCase):
+class WebApprovalTests(StoreTestCase):
     def test_web_decision_approves_domain_gate_then_resumes_harness(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            work_items = WorkItemStore(root / "work-items")
+            work_items = PGWorkItemStore(self.pool)
             remote = work_items.prepare_issue("Fix checkout", "Investigate repeated failures", "high")
             llm = QueueLLM([
                 {"thought": "commit", "tool_call": {
@@ -205,11 +216,16 @@ class WebApprovalTests(unittest.TestCase):
                 }},
                 {"thought": "done", "final": "Issue created safely"},
             ])
-            gateway = PolicyGateway(ApprovalStore(root / "web" / "policy"))
+            gateway = PolicyGateway(PGApprovalStore(self.pool))
             approver = User("alice", "user")
             app = BillGuardApp(
                 root / "web", root / "docs", llm,
                 FakeWorkItemManager(work_items), gateway, work_items,
+                bills=PGBillService(self.pool),
+                session_store=PGSessionStore(self.pool),
+                evidence_store=PGEvidenceStore(self.pool),
+                trace_store=PGTraceStore(self.pool),
+                redis_client=self.redis,
             )
 
             paused = app.chat(approver, "approval-session", "$monthly-guard-report create issue")

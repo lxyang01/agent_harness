@@ -11,14 +11,18 @@ from billguard.agents import PLANNING_AGENT_SPEC, create_planning_agent
 from tests.llm_doubles import FinalLLM, PlanningScriptLLM
 from billguard.llm import OpenAICompatibleLLM
 from billguard.auth import User
-from billguard.bills import BillFilters, BillService
+from billguard.bills import BillFilters
 from billguard.harness import AgentSpec, HarnessEngine
 from tests.llm_doubles import PlanningScriptLLM
 from billguard.parser import DecisionParseError, parse_decision
-from billguard.session import SessionStore
-from billguard.tools import DocumentService, TaskService, ToolError, build_planning_registry
+from billguard.storage_pg import (
+    PGBillService, PGEvidenceStore, PGSessionStore, PGTraceStore,
+)
+from billguard.tools import DocumentService, ToolError, build_planning_registry
 from billguard.types import Message, Session
 from billguard.web import BillGuardApp
+
+from tests.conftest import StoreTestCase, seed_default_categories
 
 
 class ScriptedLLM:
@@ -34,8 +38,13 @@ class EndlessLLM:
         return json.dumps({"thought": "继续", "tool_call": {"name": "search", "arguments": {"query": "harness"}}})
 
 
-class PlanningAgentTests(unittest.TestCase):
+class PlanningAgentTests(StoreTestCase):
+    """Planning 工具链(TaskService/DocumentService)为文件型服务(F5 范围内
+    无 PG 对应物),保持文件机制;直接构造存储的用例已切 PG:
+    SessionStore→PGSessionStore(引擎须同时注入 trace_writer=PGTraceStore)。"""
+
     def setUp(self) -> None:
+        super().setUp()
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.docs = self.root / "docs"
@@ -43,9 +52,7 @@ class PlanningAgentTests(unittest.TestCase):
         (self.docs / "requirements.md").write_text(
             "实现 Harness 循环、Session 隔离、工具注册和测试。", encoding="utf-8"
         )
-
-    def tearDown(self) -> None:
-        self.temp.cleanup()
+        self.addCleanup(self.temp.cleanup)
 
     def agent(self, session_id="project-a", llm=None):
         return create_planning_agent(llm or PlanningScriptLLM(), session_id, self.root / "state", self.docs)
@@ -114,7 +121,8 @@ class PlanningAgentTests(unittest.TestCase):
         spec = AgentSpec("restricted", "test", ("calculator",), max_steps=2)
         llm = ScriptedLLM([json.dumps({"thought": "try", "tool_call": {"name": "search", "arguments": {"query": "x"}}}),
                            json.dumps({"thought": "done", "final": "stopped"})])
-        engine = HarnessEngine(spec, llm, self.registry(), SessionStore(self.root / "restricted"))
+        engine = HarnessEngine(spec, llm, self.registry(), PGSessionStore(self.pool),
+                               trace_writer=PGTraceStore(self.pool))
         result = engine.run("s", "test")
         self.assertEqual("stopped", result.answer)
 
@@ -122,7 +130,8 @@ class PlanningAgentTests(unittest.TestCase):
         events = []
         registry = self.registry()
         engine = HarnessEngine(PLANNING_AGENT_SPEC, PlanningScriptLLM(), registry,
-                               SessionStore(self.root / "hook-state"), hooks=[events.append])
+                               PGSessionStore(self.pool), hooks=[events.append],
+                               trace_writer=PGTraceStore(self.pool))
         engine.run("project-a", "计算 2+2")
         event_types = [event.event_type for event in events]
         self.assertIn("model_decision", event_types)
@@ -132,7 +141,8 @@ class PlanningAgentTests(unittest.TestCase):
 
     def test_max_steps_stops_endless_loop(self):
         spec = AgentSpec("loop-test", "test", ("search",), max_steps=2)
-        engine = HarnessEngine(spec, EndlessLLM(), self.registry(), SessionStore(self.root / "loop"))
+        engine = HarnessEngine(spec, EndlessLLM(), self.registry(), PGSessionStore(self.pool),
+                               trace_writer=PGTraceStore(self.pool))
         result = engine.run("s", "go")
         self.assertIn("最大执行步数", result.answer)
         self.assertEqual(2, result.steps)
@@ -148,7 +158,7 @@ class PlanningAgentTests(unittest.TestCase):
         compressed = HarnessEngine.compress_history(session, keep_recent=2)
         self.assertEqual(["m4", "m5"], [message.content for message in compressed.messages])
         self.assertIn("m0", compressed.summary)
-        store = SessionStore(self.root / "compressed")
+        store = PGSessionStore(self.pool)
         store.save(compressed)
         loaded = store.load("s1")
         self.assertEqual(loaded.messages, compressed.messages)  # save 不再隐藏改写
@@ -258,7 +268,10 @@ TX-004,2026-09-04 12:05:00,Apple Store,购物,899.0,信用卡,疑似重复扣款
 """
 
     def test_bill_import_deduplicate_query_and_category_audit(self):
-        service = BillService(self.root / "bill-state")
+        # PG 版不在空库播种全局默认类别(spec 决策);owner=None 的根句柄导入
+        # 依赖夹具对齐 SQLite 版“空库播种”契约,按类别名的断言语义保持不变
+        seed_default_categories(self.pool)
+        service = PGBillService(self.pool)
         first = service.import_bills("bills.csv", self.bills_csv())
         self.assertEqual(4, first["imported_rows"])
         second = service.import_bills("bills.csv", self.bills_csv())
@@ -309,7 +322,14 @@ TX-004,2026-09-04 12:05:00,Apple Store,购物,899.0,信用卡,疑似重复扣款
         self.assertIn("批量核查", audits[-1]["new_value"])
 
     def test_web_app_snapshot_chat_import_and_session_delete(self):
-        app = BillGuardApp(self.root / "web-state", self.docs, FinalLLM())
+        app = BillGuardApp(
+            self.root / "web-state", self.docs, FinalLLM(),
+            bills=PGBillService(self.pool),
+            session_store=PGSessionStore(self.pool),
+            evidence_store=PGEvidenceStore(self.pool),
+            trace_store=PGTraceStore(self.pool),
+            redis_client=self.redis,
+        )
         user = User("tester", "user")
         empty = app.snapshot(user, "web-project")
         self.assertEqual(0, empty["overview"]["count"])
@@ -320,10 +340,17 @@ TX-004,2026-09-04 12:05:00,Apple Store,购物,899.0,信用卡,疑似重复扣款
         imported = app.import_bills(user, {"filename": "bills.csv", "csv_text": self.bills_csv()})
         self.assertEqual(4, imported["result"]["imported_rows"])
         from tests.llm_doubles import ScriptedLLM
-        scripted_app = BillGuardApp(self.root / "web-state", self.docs, ScriptedLLM([
-            {"thought": "先查总览", "tool_call": {"name": "bill_overview", "arguments": {}}},
-            {"thought": "done", "final": "当前共 4 笔支出,其中 Apple Store 2 笔。"},
-        ]))
+        scripted_app = BillGuardApp(
+            self.root / "web-state", self.docs, ScriptedLLM([
+                {"thought": "先查总览", "tool_call": {"name": "bill_overview", "arguments": {}}},
+                {"thought": "done", "final": "当前共 4 笔支出,其中 Apple Store 2 笔。"},
+            ]),
+            bills=PGBillService(self.pool),
+            session_store=PGSessionStore(self.pool),
+            evidence_store=PGEvidenceStore(self.pool),
+            trace_store=PGTraceStore(self.pool),
+            redis_client=self.redis,
+        )
         result = scripted_app.chat(user, "web-project", "总结一下当前的支出情况")
         self.assertIn("4 笔支出", result["answer"])
         self.assertTrue(result["evidence"])
@@ -343,12 +370,14 @@ TX-004,2026-09-04 12:05:00,Apple Store,购物,899.0,信用卡,疑似重复扣款
         self.assertEqual(4, restored["overview"]["count"])
         self.assertGreater(restored["sessions"][0]["message_count"], 0)
 
-        trace_path = self.root / "web-state" / "billguard" / "sessions" / "traces" / f"{SessionStore._key('web-project')}.jsonl"
-        self.assertTrue(trace_path.exists())
+        # 原断言检查本地 trace JSONL 文件存在/删除(文件机制);PG 等价可观察量:
+        # PGTraceStore 的 run 列表在删除会话前后由非空变空
+        traces = PGTraceStore(self.pool)
+        self.assertEqual(1, len(traces.list_runs("web-project")))
         deleted = app.delete_session(user, "web-project")
         self.assertTrue(deleted["deleted"])
         self.assertNotIn("web-project", [item["id"] for item in deleted["sessions"]])
-        self.assertFalse(trace_path.exists())
+        self.assertEqual([], traces.list_runs("web-project"))
         self.assertEqual(4, app.bills.overview()["count"])
 
 
