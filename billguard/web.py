@@ -7,6 +7,7 @@ import json
 import mimetypes
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime
@@ -21,7 +22,7 @@ from .auth import (AuthError, PermissionDenied, can, clear_session_cookie,
 from .auth import AuthSessionStore, Authenticator, UserStore
 from .bills import WORKFLOW_STATUSES, BillFilters, BillService
 from .coordination import (LockedError, RedisAuthSessions, RedisLLMLimiter,
-                           RedisSessionLock)
+                           RedisLoginThrottle, RedisSessionLock)
 from .guardrails import MAX_HTTP_REQUEST_BYTES, validate_user_input
 from .evaluation import EvaluationReportStore
 from .llm import OpenAICompatibleLLM
@@ -69,6 +70,55 @@ class _RedisLLMSlots:
 
     def release(self) -> None:
         self._limiter.release()
+
+
+class MemoryLoginThrottle:
+    """单进程模式的登录节流:与 coordination.RedisLoginThrottle 语义一致。
+
+    同一调用面(allowed / record_failure / reset)与同一固定窗口语义:
+    窗口从该 (username, ip) 的第一次失败起算 window_seconds 秒,期间累计
+    失败达 max_failures 次即拒绝;成功登录清零;窗口过期条目作废(等价
+    Redis 键 TTL 到期)。dict + threading.Lock 保证线程安全(BoundedHTTPServer
+    是多线程服务);键名沿用 "{username}|{ip}" 原文——进程内无遍历需求,
+    不需要 Redis 版的 sha256 摘要防泄露。
+    """
+
+    def __init__(self, max_failures: int = 5, window_seconds: int = 600) -> None:
+        self._max_failures = max_failures
+        self._window_seconds = window_seconds
+        self._guard = threading.Lock()
+        self._failures: dict[str, tuple[int, float]] = {}  # 键 -> (次数, 窗口截止)
+
+    @staticmethod
+    def _key(username: str, ip: str) -> str:
+        return f"{username}|{ip}"
+
+    def allowed(self, username: str, ip: str) -> bool:
+        key = self._key(username, ip)
+        with self._guard:
+            entry = self._failures.get(key)
+            if entry is None:
+                return True
+            count, deadline = entry
+            if time.monotonic() >= deadline:  # 窗口已过:条目作废,惰性清除
+                del self._failures[key]
+                return True
+            return count < self._max_failures
+
+    def record_failure(self, username: str, ip: str) -> None:
+        key = self._key(username, ip)
+        with self._guard:
+            now = time.monotonic()
+            entry = self._failures.get(key)
+            if entry is None or now >= entry[1]:
+                # 首次失败(或窗口已过):开新窗,只此一次定窗,后续失败不续窗
+                self._failures[key] = (1, now + self._window_seconds)
+            else:
+                self._failures[key] = (entry[0] + 1, entry[1])
+
+    def reset(self, username: str, ip: str) -> None:
+        with self._guard:
+            self._failures.pop(self._key(username, ip), None)
 
 
 def _epoch_seconds(updated_at: Any) -> float:
@@ -200,7 +250,8 @@ class BillGuardApp:
                  session_store: Any = None,
                  evidence_store: Any = None,
                  trace_store: Any = None,
-                 redis_client: Any = None) -> None:
+                 redis_client: Any = None,
+                 login_throttle: Any = None) -> None:
         if max_concurrent_llm < 1:
             raise ValueError("max_concurrent_llm 必须不小于 1")
         self.data_dir = Path(data_dir)
@@ -221,6 +272,9 @@ class BillGuardApp:
         self.policy_gateway = policy_gateway
         self.work_item_store = work_item_store
         self.authenticator = authenticator
+        # 登录节流:None = 关闭(既有测试直构 app 不受影响);serve() 在两种
+        # 部署模式下都会显式注入——分布式 RedisLoginThrottle / 单进程 MemoryLoginThrottle。
+        self.login_throttle = login_throttle
         self._redis_client = redis_client
         self._llm_slots = (_RedisLLMSlots(RedisLLMLimiter(redis_client, max_concurrent_llm))
                            if redis_client is not None
@@ -868,11 +922,24 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
                     password = str(body.get("password", ""))
                     if not username or not password:
                         raise ValueError("用户名和密码不能为空")
+                    throttle = app.login_throttle
+                    # 客户端 IP 识别:集群内全部流量必经 nginx,其 proxy_set_header
+                    # 对 X-Real-IP 强制覆写,外部请求自带的该头到不了应用;
+                    # 且 web 端口不发布到 compose 网络之外,不存在绕过 nginx 的
+                    # 直连路径。本地开发无代理 → 用套接字对端地址。
+                    ip = self.headers.get("X-Real-IP") or self.client_address[0]
+                    if throttle is not None and not throttle.allowed(username, ip):
+                        self._json(429, {"error": "登录失败次数过多,请稍后再试"})
+                        return
                     try:
                         user, token = app.authenticator.login(username, password)
                     except AuthError as exc:
+                        if throttle is not None:
+                            throttle.record_failure(username, ip)
                         self._json(401, {"error": str(exc)})
                         return
+                    if throttle is not None:
+                        throttle.reset(username, ip)
                     self._json(200, {"user": {"username": user.username, "role": user.role}},
                                set_cookie=session_cookie(token))
                     return
@@ -1027,6 +1094,8 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
             "evidence_store": PGEvidenceStore(pool),
             "trace_store": PGTraceStore(pool),
             "redis_client": redis_client,
+            # 登录节流走 Redis:两实例共享失败计数,任一实例记满即全集群锁定
+            "login_throttle": RedisLoginThrottle(redis_client),
         }
     else:
         # 单进程模式(现有逻辑不动):SQLite/文件存储 + stdio 子进程 MCP
@@ -1057,6 +1126,8 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
             print('  python -m billguard.users --data-dir <data-dir> add admin --role admin')
             raise SystemExit(1)
         authenticator = Authenticator(users_store, AuthSessionStore(auth_root))
+        # 登录节流两种部署模式都启用:单进程退回进程内计数(dict + Lock)
+        app_stores["login_throttle"] = MemoryLoginThrottle()
     server = BoundedHTTPServer(
         (host, port), make_handler(BillGuardApp(
             data_dir, "docs", llm, mcp_manager, policy_gateway, work_item_store,

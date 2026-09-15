@@ -22,6 +22,13 @@ if current < tonumber(ARGV[1]) then
 end
 return 0"""
 
+_LOGIN_FAIL_LUA = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current"""
+
 
 class LockedError(RuntimeError):
     """423: 另一实例正在处理该会话。"""
@@ -126,3 +133,35 @@ class RedisAuthSessions:
             self._client.delete(*keys)
         self._client.delete(index)
         return len(keys)
+
+
+class RedisLoginThrottle:
+    """登录暴力破解防护:按 (username, ip) 失败计数,达 max_failures 次锁定。
+
+    固定窗口:窗口从该组合的**第一次失败**起算 window_seconds 秒,不做
+    滑动续期——实现简单且防御足够(攻击者至多在窗口边界附近多得少量
+    尝试次数)。计数键 login:fail:{sha256(username|ip)},窗口过期整键
+    消失即自动解锁;成功登录 DEL 清零。record_failure 用 Lua 保证
+    INCR 与首次 EXPIRE 原子(只设一次 TTL,后续失败不续窗,也不会
+    留下无 TTL 的常驻计数键)。
+    """
+
+    def __init__(self, client, max_failures: int = 5, window_seconds: int = 600) -> None:
+        self._client = client
+        self._max_failures = max_failures
+        self._window_seconds = window_seconds
+
+    @staticmethod
+    def _key(username: str, ip: str) -> str:
+        return f"login:fail:{hashlib.sha256(f'{username}|{ip}'.encode()).hexdigest()}"
+
+    def allowed(self, username: str, ip: str) -> bool:
+        count = self._client.get(self._key(username, ip))
+        return (int(count) if count is not None else 0) < self._max_failures
+
+    def record_failure(self, username: str, ip: str) -> None:
+        self._client.eval(_LOGIN_FAIL_LUA, 1, self._key(username, ip),
+                          str(self._window_seconds))
+
+    def reset(self, username: str, ip: str) -> None:
+        self._client.delete(self._key(username, ip))
