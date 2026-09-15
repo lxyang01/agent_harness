@@ -1,0 +1,108 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: billguard
+      POSTGRES_PASSWORD: billguard
+      POSTGRES_DB: billguard
+    ports: ["127.0.0.1:5433:5432"]   # 宿主机测试直连
+    volumes:
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U billguard"]
+      interval: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:6380:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 10
+
+  bill-server:
+    build: {context: ., dockerfile: docker/Dockerfile}
+    command: ["-m", "billguard.mcp_servers.bill_server",
+              "--data-dir", "/data/bills",
+              "--transport", "streamable-http",
+              "--host", "0.0.0.0",
+              "--port", "8010"]
+    environment: &web_env
+      BILLGUARD_PG_DSN: postgresql://billguard:billguard@postgres:5432/billguard
+      BILLGUARD_REDIS_URL: redis://redis:6379/0
+      # API Key 透传:web 启动仅检查变量存在,缺省占位值让容器可启动供基础设施
+      # 冒烟(健康/会话锁/故障转移/对抗评测均不需要真实 Key);真实对话请在
+      # 宿主机 export OPENROUTER_API_KEY(或 OPENAI_API_KEY)后 up -d。
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-e2e-smoke-key}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-e2e-smoke-key}
+    volumes: [billdata:/data]
+    # serve() 启动即连 MCP,慢启动曾致容器永久退出;unless-stopped 自动重启
+    # (compose kill/stop 属手动停止,不受重启策略影响,冒烟 A3/B3 流程不变)
+    restart: unless-stopped
+    # streamable-http 无公开健康路径,TCP 能连上即为存活
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import socket; socket.create_connection(('127.0.0.1', 8010), timeout=2).close()"]
+      interval: 5s
+      retries: 10
+      start_period: 10s
+
+  work-item-server:
+    build: {context: ., dockerfile: docker/Dockerfile}
+    command: ["-m", "billguard.mcp_servers.work_item_server",
+              "--data-dir", "/data/work-items", "serve",
+              "--transport", "streamable-http",
+              "--host", "0.0.0.0",
+              "--port", "8020"]
+    environment: *web_env
+    volumes: [billdata:/data]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import socket; socket.create_connection(('127.0.0.1', 8020), timeout=2).close()"]
+      interval: 5s
+      retries: 10
+      start_period: 10s
+
+  web-1: &web
+    build: {context: ., dockerfile: docker/Dockerfile}
+    command: ["-m", "billguard.web", "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      <<: *web_env
+      BILLGUARD_BILL_MCP_URL: http://bill-server:8010/mcp
+      BILLGUARD_WORK_ITEM_MCP_URL: http://work-item-server:8020/mcp
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    # web-2 经 <<: *web 继承同一重启策略:MCP 慢启动致退出时自动重试
+    restart: unless-stopped
+    # 镜像是 python:3.13-slim(无 curl),用 urllib 打自身 /api/health;
+    # 端口各不相同(8001/8002),web-2 必须覆写继承自锚点的本条健康检查
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/health', timeout=3)"]
+      interval: 5s
+      retries: 10
+      start_period: 30s
+
+  web-2:
+    <<: *web
+    command: ["-m", "billguard.web", "--host", "0.0.0.0", "--port", "8002"]
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/api/health', timeout=3)"]
+      interval: 5s
+      retries: 10
+      start_period: 30s
+
+  nginx:
+    image: nginx:alpine
+    ports: ["8080:80"]
+    volumes: ["./docker/nginx.conf:/etc/nginx/conf.d/default.conf"]
+    depends_on: [web-1, web-2]
+
+volumes:
+  pgdata:
+  billdata:

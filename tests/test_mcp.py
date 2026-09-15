@@ -13,10 +13,12 @@ import mcp
 
 from billguard.agents import create_mcp_bill_agent
 from tests.llm_doubles import ScriptedLLM
-from billguard.bills import BillService
 from billguard.mcp_runtime import MCPClientManager, MCPError
+from billguard.storage_pg import PGBillService
 from billguard.tools import ToolRegistry
 from billguard.work_items import WorkItemStore
+
+from tests.conftest import PG_DSN, StoreTestCase
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -34,12 +36,24 @@ def mcp_subprocess_env() -> dict[str, str]:
     return env
 
 
-class BillServerTests(unittest.TestCase):
+def pg_subprocess_env() -> dict[str, str]:
+    """MCP 子进程走 PG 分支(F6:设置 BILLGUARD_PG_DSN → PG 存储)。"""
+    env = mcp_subprocess_env()
+    env["BILLGUARD_PG_DSN"] = PG_DSN
+    return env
+
+
+class BillServerTests(StoreTestCase):
+    """bill_server 以 PG 后端运行(BILLGUARD_PG_DSN 已注入子进程环境);
+    数据种子与校验均走 PGBillService(共享 compose PostgreSQL)。"""
+
     def setUp(self) -> None:
+        super().setUp()
         self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.bills_dir = self.root / "bills"
-        service = BillService(self.bills_dir)
+        service = PGBillService(self.pool)
         service.import_bills("bills.csv", """tx_id,paid_at,merchant,category,amount,method,note
 BG-001,2026-09-01 08:30:00,饿了么,餐饮,35.5,支付宝,午餐外卖
 BG-002,2026-09-02 12:10:00,滴滴出行,交通,26.0,微信,打车到公司 联系电话 13812345678
@@ -54,18 +68,15 @@ BG-004,2026-09-05 20:00:00,爱奇艺,订阅,35.0,支付宝,视频会员自动续
             request_timeout=15,
             audit_hook=lambda event, data: self.audit.append((event, data)),
         )
+        self.addCleanup(self.manager.close)
         self.snapshot = self.manager.connect_stdio(
             "bill",
             sys.executable,
             ["-u", "-m", "billguard.mcp_servers.bill_server",
              "--data-dir", str(self.bills_dir)],
             cwd=PROJECT_ROOT,
-            env=mcp_subprocess_env(),
+            env=pg_subprocess_env(),
         )
-
-    def tearDown(self) -> None:
-        self.manager.close()
-        self.temp.cleanup()
 
     def test_capability_discovery_tools_resources_and_prompts(self):
         self.assertEqual("stdio", self.snapshot.transport)
@@ -170,7 +181,8 @@ BG-004,2026-09-05 20:00:00,爱奇艺,订阅,35.0,支付宝,视频会员自动续
         self.assertEqual(1, result["count"])
         self.assertEqual("待核查", result["changes"]["status"])
 
-        audited = BillService(self.bills_dir).transaction_audits("BG-001")
+        # 原断言经文件版 BillService 读回;PG 模式下同一审计行在 PG 中
+        audited = PGBillService(self.pool).transaction_audits("BG-001")
         self.assertEqual("workflow", audited[-1]["action"])
         self.assertEqual("mcp-test", audited[-1]["operator"])
 
@@ -198,28 +210,28 @@ AL-2,2026-09-03 20:00:00,爱奇艺,订阅,35.0,支付宝,视频会员
 """
 
 
-class BillServerOwnerScopeTests(unittest.TestCase):
-    """bill_server 的 owner 边界:空 owner 仅见存量 NULL 行,具名 owner 仅见本人行。"""
+class BillServerOwnerScopeTests(StoreTestCase):
+    """bill_server 的 owner 边界(PG 后端):空 owner 仅见存量 NULL 行,
+    具名 owner 仅见本人行。"""
 
     def setUp(self) -> None:
+        super().setUp()
         self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.bills_dir = self.root / "bills"
-        service = BillService(self.bills_dir)
+        service = PGBillService(self.pool)
         service.import_bills("legacy.csv", LEGACY_CSV)  # owner=None → 存量 NULL 行
         service.for_user("alice")  # 首访播种 alice 的默认类别
         service.import_bills("alice.csv", ALICE_CSV, owner="alice")
         self.manager = MCPClientManager(request_timeout=15)
+        self.addCleanup(self.manager.close)
         self.snapshot = self.manager.connect_stdio(
             "bill", sys.executable,
             ["-u", "-m", "billguard.mcp_servers.bill_server",
              "--data-dir", str(self.bills_dir)],
-            cwd=PROJECT_ROOT, env=mcp_subprocess_env(),
+            cwd=PROJECT_ROOT, env=pg_subprocess_env(),
         )
-
-    def tearDown(self) -> None:
-        self.manager.close()
-        self.temp.cleanup()
 
     def test_default_and_empty_owner_see_only_legacy_null_rows(self):
         # 服务器广播的 schema 含 owner 参数(供 Host 注入,web 层再对模型隐藏)
@@ -238,7 +250,7 @@ class BillServerOwnerScopeTests(unittest.TestCase):
     def test_categories_resource_is_static_and_owner_agnostic(self):
         # §4:bill://categories 返回静态默认类目目录(name/keywords/enabled),
         # 不查库、不含计数,任何 owner 的个性化规则都不进资源
-        BillService(self.bills_dir).for_user("alice").save_category("私人定制类", ["专属关键词"])
+        PGBillService(self.pool).for_user("alice").save_category("私人定制类", ["专属关键词"])
         payload = str(self.manager.read_resource("bill", "bill://categories"))
         self.assertIn("餐饮", payload)          # 默认目录仍在
         self.assertNotIn("私人定制类", payload)  # 个性化规则不泄露
@@ -266,6 +278,12 @@ class BillServerOwnerScopeTests(unittest.TestCase):
 
 
 class WorkItemMCPIntegrationTests(unittest.TestCase):
+    """保留 SQLite 回退分支的端到端覆盖(F6 工厂 env 缺省 → WorkItemStore 文件版):
+    - stdio/HTTP 子进程服务器全链路仍需无外部依赖即可运行(单进程部署形态);
+    - ISS-0001 断言依赖“空库序列从 1 起”,PG 共享库 DELETE 不重置 BIGSERIAL;
+    - 人审经文件版 WorkItemStore.decide 完成(工具通道外)。
+    PG 分支的等价 prepare→decide→commit 幂等语义已由 test_storage_pg 覆盖。"""
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+
+from . import apply_streamable_bind
 
 from ..bills import (
     DEFAULT_CATEGORIES,
@@ -21,6 +24,9 @@ from ..bills import (
     BillFilters,
     BillService,
 )
+
+# F6:进程级 PG 连接池单例;仅当设置了 BILLGUARD_PG_DSN 时才会创建。
+_PG_POOL = None
 
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False,
@@ -39,13 +45,27 @@ def _filters(date_from: str | None = None, date_to: str | None = None,
                        min_amount, max_amount, query or "")
 
 
+def _build_service(data_dir: str | Path) -> BillService:
+    """存储工厂(F6):设置 BILLGUARD_PG_DSN 时用 PG(进程级单例连接池),
+    未设置时保持 SQLite 行为不变。"""
+    global _PG_POOL
+    dsn = os.environ.get("BILLGUARD_PG_DSN")
+    if not dsn:
+        return BillService(data_dir)
+    from ..storage_pg import PGBillService, new_pg_pool  # 惰性导入:stdio 模式不依赖 psycopg
+    if _PG_POOL is None:
+        _PG_POOL = new_pg_pool(dsn)
+    return PGBillService(_PG_POOL)
+
+
 def build_server(data_dir: str | Path) -> FastMCP:
-    service = BillService(data_dir)
+    service = _build_service(data_dir)
+    backend = "PostgreSQL" if os.environ.get("BILLGUARD_PG_DSN") else "SQLite"
     server = FastMCP(
         "BillGuard Data MCP",
         instructions=(
             "提供个人账单的确定性查询、聚合、周期对比、异常检测和脱敏样本。"
-            "统计结果来自 SQLite；样本备注始终经过 PII 脱敏。"
+            f"统计结果来自 {backend}；样本备注始终经过 PII 脱敏。"
         ),
         json_response=True,
         stateless_http=True,
@@ -227,8 +247,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8010)
     args = parser.parse_args()
     server = build_server(args.data_dir)
-    server.settings.host = args.host
-    server.settings.port = args.port
+    # 按最终绑定地址重算 DNS 重绑定防护(否则 0.0.0.0 下服务名 Host 被 421)
+    apply_streamable_bind(server, args.host, args.port)
     server.run(transport=args.transport)
 
 

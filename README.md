@@ -1,280 +1,146 @@
-# BillGuard · 可审计的账单守卫 Agent
+# BillGuard · 可审计的账单守卫 Agent(分布式版)
 
-让 LLM Agent 直接碰业务数据是不可信的:它会编数字、越权调工具、被账单备注里的提示注入带着跑,写操作更没人拦。BillGuard 是这个问题的一个完整工程答案 —— 一个**框架无关的可审计 Agent Harness**,以"分层防线 + 可验证"为设计原则,业务载体是个人账单守卫:从账单与订阅 CSV 中发现涨价、重复扣费和大额离群,输出带证据的行动计划。
+[![CI](https://github.com/lxyang01/agent_harness/actions/workflows/ci.yml/badge.svg?branch=distributed)](https://github.com/lxyang01/agent_harness/actions/workflows/ci.yml)
 
-每一层防线都可独立验证:**23 条对抗探针**(零费用、确定性)全部防御成功,171 项单元测试覆盖并发竞态、权限边界、数据隔离与记忆分层。
+> 本分支(distributed)将 BillGuard 平移到无状态多实例部署:nginx + web×2 + PostgreSQL + Redis + 共享 MCP,一条命令起全集群。**永不合并回 main**;单进程零依赖版见 **main** 分支,两分支功能一致,差异在部署形态、并发原语与登录防护。
 
-| 防线 | 一句话证据 |
-| --- | --- |
-| **受控工具面** | 模型只能调用注册过的工具,不执行任意 SQL/Shell;参数过 Schema 硬校验,越权参数被拦截 |
-| **Skill 路由与契约** | 触发词/`$显式`路由到 4 个 Skill;白名单在模型可见面与执行面同时生效;报告缺章节、漏调工具、参数越界都会被拦截并给出纠正反馈 |
-| **三阶段审批** | 高风险写操作以 Checkpoint 持久化暂停(`prepare → 人工审批 → commit`),批准后跨进程恢复;伪造审批人被服务端身份覆盖 |
-| **登录与角色** | HttpOnly Cookie 会话 + admin/user 两角色能力矩阵;`decided_by`/`operator` 一律取服务端身份 |
-| **按用户数据隔离** | 本地与 MCP 工具走同一条 owner 边界;模型伪造 `owner` 参数会被注入层覆盖(对抗探针实锤验证) |
-| **并发与资源加固** | 审批乐观并发恰好一次生效;有界线程池 + 排队 503;LLM 并发上限 429;单次运行总时间预算安全停止 |
+BillGuard 是一个**框架无关的可审计 Agent Harness**:模型只能调用注册过的工具,不执行任意 SQL/Shell;金额与结论必须来自工具返回的真实数据;高风险写操作走三阶段审批(准备 → 人工批准 → 提交)。**23 条对抗探针**(零费用、确定性)验证提示注入、越权参数、伪造数字、跨用户数据窃取等攻击全部被拦截。业务载体是个人账单守卫:从账单与订阅 CSV 中发现涨价、重复扣费和大额离群,输出带证据的行动计划。
 
-## 功能说明
+本分支在集群形态下保留全部防线,并把并发防御重建在分布式原语上(Redis 会话锁、全集群 LLM 限额、PG 行锁审批恰好一次、Redis 登录失败计数),216 项单元测试与 23 条对抗探针在 PG/Redis 后端下全部通过(宿主机与集群内两端验证)。
 
-### 工作台
+## 功能
 
-- **支出概览**:总支出/笔数/待核查/最大单笔,类别与商户分布,每日趋势,订阅清单(周期/预期/最近扣款)*—— 试试:"这个月花了多少钱"*
-- **守卫 Agent**:总结结构、比较周期、识别异常、搜交易、读脱敏样本,区分数据事实与推测;回答附带可点击的"数据依据"直达交易明细 *—— 试试:"支付类支出最近有什么变化"*
-- **交易明细**:多维筛选与分页,导出 CSV(含未脱敏备注,登录用户可用),人工修正类别,批量核查(≤200)留审计
-- **类别管理**:关键词规则增删改/启停/审计;重匹配只替换规则类别,人工类别保留
-- **账单导入**:UTF-8 CSV 按交易编号去重、自动归类,记录成功/重复/失败明细;支持账单与订阅两份文件;**清空我的数据**一键重来(仅清当前用户,他人与 Session 不受影响)
-- **守卫报告**:保存/复制/导出 Markdown/A4 打印
-- **审批中心**:高风险写操作在此暂停等待人工决定;卡片直接展示操作内容(标题/说明/优先级/关键参数),批准或拒绝前看得清要放行什么
-- **Session 与 Trace**:会话按用户隔离;运行观测面板只读回放 Trace —— Skill 激活、模型决策、耗时、Token、审批暂停/恢复
+与单进程版功能相同:账单/订阅 CSV 导入、支出概览与多维明细、四类异常检测(spike / duplicate / price_hike / outlier)、守卫 Agent 对话(4 Skill 路由 + 三阶段审批)、多用户角色与按用户数据隔离、对抗/路由/真实模型评测。本分支把这些搬到多实例无状态部署下:
 
-### 数据与隐私
+- **多实例无状态**:web-1 / web-2 任意实例可服务任意请求,kill 任一实例服务不中断,对话会话与登录态跨实例延续
+- **登录暴力破解防护**:按用户名+IP 失败计数,5 次锁定 10 分钟(Redis 计数;单进程模式为进程内计数),成功登录即清零;集群内经 nginx 的 X-Real-IP 识别客户端(nginx 强制覆写该头,web 端口不对外,不可伪造)
+- **全量验证**:216 项单元测试与 23 条对抗探针全部在 PG/Redis 后端下通过(宿主机与集群内两端验证)
+- **一条命令拉起集群**:`docker compose up` 起 nginx + web×2 + PostgreSQL + Redis + 两个 MCP 服务
 
-- 账单库 `.sessions/billguard/bills/`;Session 与 Trace `.../sessions/`;审批 Checkpoint `.../policy/`;认证库 `.../auth/`(PBKDF2 密码哈希,会话只存 token 哈希);评测报告 `.sessions/evaluations/`
-- Agent 最多读取 20 条样本;发给模型的搜索结果与样本做基础手机号/邮箱脱敏;原始备注只在本机页面展示
-- 真实账单数据不能离开内网时,使用本地模型或纯统计看板
+## 架构与技术
 
-### CSV 格式
-
-账单必要字段 `tx_id,paid_at,merchant,category,amount,method,note`;订阅必要字段 `name,merchant,cycle,expected_amount`;支持对应中文表头。
-
-```csv
-tx_id,paid_at,merchant,category,amount,method,note
-TX0001,2026-06-01 11:41:15,美团外卖,餐饮,21.28,微信支付,
-```
-
-## 技术说明
-
-### 架构
+### 集群拓扑
 
 ```text
-账单 CSV + 订阅 CSV
- └─ Import + Validation + Deduplication
-     └─ SQLite Bill Store(按 owner 隔离)
-         ├─ 支出概览 / 交易明细 / 类别管理
-         └─ Controlled Bill Tools(本地 + MCP 同一 owner 边界)
-             └─ BillGuard 账单守卫助手
-                 └─ HarnessEngine
-                     ├─ Skill Runtime(路由 + 工具白名单 + 完成契约)
-                     ├─ Policy Gateway(高风险写 → Checkpoint 审批)
-                     ├─ Context / Session(按用户归属)
-                     ├─ OpenAI-compatible LLM(任意兼容服务)
-                     └─ JSONL Trace(全量留痕,可回放)
+nginx :8080(ip_hash 负载均衡)
+ ├── web-1 :8001(无状态)
+ └── web-2 :8002(无状态,可水平扩展)
+      ├── postgres :5432   全部持久业务数据(13 张表)
+      ├── redis    :6379   会话锁 / LLM 并发计数 / 登录会话 / 登录失败计数
+      ├── bill-server      :8010  账单 MCP(streamable-http)
+      └── work-item-server :8020  工单 MCP(streamable-http)
 ```
 
-LLM 不执行任意 SQL。它只能调用受控工具查询概览、环比、异常、脱敏样本和订阅比对,回答中的每个数字都可追溯到工具结果;模型调用、工具调用、错误与最终答案全量写入 JSONL Trace。`billguard/agents/planning.py` 保留了一个 PlanningAgent,展示同一 Harness 换业务载体的成本接近于零。
+- web 实例间零直接通信,一切经 Redis/PG;compose 服务名即服务发现
+- 宿主机端口:nginx `8080`(所有接口;如需仅本机访问可改为 `127.0.0.1:8080:80`);PG `127.0.0.1:5433`、Redis `127.0.0.1:6380` 仅本机监听,供宿主机测试/评测直连
 
-### Skill Runtime
+### 存储分工
 
-- 启动时只发现 `SKILL.md` 的名称和描述,激活时才加载完整正文
-- `$skill-name` 显式选择 + 业务触发词隐式路由;每次最多激活两个 Skill,记录内容哈希、匹配原因和分数
-- Skill 白名单同时作用于模型可见工具与执行校验;路由失败、内容损坏、正文超限(8000 字符)均安全失败
-- 触发词支持**共现组**(`[取消,订阅]` 全词出现即命中,与语序无关);取消X订阅/把X的订阅取消掉/退订X等自然说法全部覆盖
-- Skill 内容按**不可信数据**处理:注入时明确声明越权/绕审批指令一律拒绝;报告结构契约(gate_terms/章节)由 routes.json 声明,不再按 Skill 名硬编码
-
-| Skill | 用途 |
-| --- | --- |
-| `bill-triage` | 支出概览、账单分流和初步证据收集 |
-| `anomaly-investigation` | 环比比较、四类异常下钻和低基数排查 |
-| `root-cause-analysis` | 区分交易事实、原因假设、反向证据和验证动作 |
-| `monthly-guard-report` | 证据化的月度守卫报告与行动计划 |
-
-月度守卫报告有固定四章节完成契约(**支出事实 / 异常清单 / 根因推测 / 行动计划**),缺任何章节会被拦截并获得可执行的纠正反馈。
-
-**四类异常的确定性阈值**(与 `billguard/bills.py` 常量一致,随结果一并返回供核对):
-
-| 维度 | 判定 |
-| --- | --- |
-| spike | 本期支出 ≥ 上期×2 且 ≥¥100 |
-| duplicate | 同商户同金额,间隔 ≤3 天 |
-| price_hike | 订阅最近实扣与预期差额 ≥ max(¥1, 预期×20%) |
-| outlier | 单笔 ≥¥200 且 ≥ 类别均值×5 |
-
-### MCP Runtime
-
-既是 MCP Host,也内置两个 MCP Server:
-
-| 组件 | Transport | 能力 |
+| 层 | 承载 | 内容 |
 | --- | --- | --- |
-| Bill Data MCP | stdio / Streamable HTTP | 6 Tools、3 Resources、2 Prompts |
-| Work Item MCP | Streamable HTTP / stdio | 查询工单、准备工单、审批后幂等提交 |
+| PostgreSQL(持久) | 13 张表,`docker/init.sql` 预建 | users / transactions / categories / subscriptions / tx_audits / imports / reports / approvals / wi_approvals / issues,以及原 JSON/JSONL 文件改成的 sessions / evidence / traces 三张表(JSONB) |
+| Redis(协调) | 5 类键 | `lock:session:{sha256}` 会话锁、`llm:slots` LLM 并发计数、`auth:token:{sha256}` 登录令牌、`auth:user:{username}` 令牌反向索引、`login:fail:{sha256}` 登录失败计数(5 次锁定 10 分钟,成功登录清零) |
 
-`MCPClientManager` 在后台事件循环维护持久 `ClientSession`,对同步 Harness 提供超时受控接口;远程工具以 `server.tool` 命名空间动态注册。共享的 MCP 子进程无法认证,因此 owner 身份在**工具边界服务端注入**:web 层包装每个 `bill.*` 工具强制覆盖 `owner` 并从模型可见 Schema 中移除 —— 伪造无效。
+存储层 `billguard/storage_pg.py` 公开方法与单进程版同名同参(构造参数从目录换为连接池);表结构由 init.sql 预建,运行时不做任何 DDL。每 web 实例一个 psycopg3 连接池(min 2 / max 8)。
 
-工单创建采用三阶段协议,`approve` 不出现在工具列表中;未经人工批准的 `commit_issue` 失败,批准后重复提交幂等返回同一工单。
+### 与 main(单进程版)逐项对比
 
-### 策略网关与可恢复审批
-
-动态 MCP 工具按服务端风险元数据映射为 `read`/`low_write`/`high_write`/`forbidden`。高风险写不直接执行:Harness 把 Session、Trace、工具参数、Skill 版本和白名单持久化为 Checkpoint 并返回 `approval_pending`;Web 审批中心查看完整参数后批准/拒绝,批准后从暂停 step 跨进程恢复。创建正式工单还要过 Work Item 服务自身的业务审批 —— 双重防线。
-
-Harness 还从用户原话编译**动态契约**:"最多 8 条"变成参数上限,报告类任务变成章节结构;漏调、乱序、越界、缺章节全部拦截。
-
-### 多用户与角色
-
-- 强制登录:HttpOnly + SameSite=Strict Cookie,服务端只存 token 哈希,7 天滑动过期;空用户库拒绝启动
-- 能力矩阵服务端强制:user=业务写入+审批+导出;admin=全部+用户管理
-- `decided_by`/`operator` 一律取服务端登录身份,请求体伪造无效
-- 账单数据按用户隔离,各自导入自己的副本;存量无主数据仅 admin 可见;分析 Session 同样按用户归属
-
-### 并发与限流
-
-- 审批决定条件 UPDATE 乐观并发:并发 decide 恰好一个生效
-- `chat` 与审批恢复共用 per-session 锁,消除会话文件丢失更新
-- 有界线程池 + 排队(满载 503)、LLM 并发上限(429)、单次运行总时间预算(安全停止)
-
-### 记忆分层(Context Economics)
-
-模型每次调用的上下文由四层机制约束,长对话不再全量重放:
-
-| 层 | 机制 | 参数 |
+| 维度 | main(单进程,零依赖) | distributed(本分支) |
 | --- | --- | --- |
-| **会话摘要** | 历史超过阈值时,早期轮次压缩为"问→答"对进摘要(助手 JSON 自动取 final,连续未答问题逐条留痕),工具调用/结果消息丢弃;近期原文保留。压缩即时落盘并发 `history_compressed` 事件进 Trace,运行观测面板可见 | `summary_threshold=40` / `summary_keep_recent=12` |
-| **工具结果截断引用** | 超过字符上限的工具结果在模型可见面截断并附存证指引;**完整值仍写 Trace 并贯穿审批 Checkpoint 供数字 Groundedness 门禁校验** —— 截断只影响模型可见面,不影响审计与校验 | `tool_result_context_limit=1500` |
-| **上下文预算兜底** | system → Skill → 契约 → 摘要 → 近期消息按优先级从新到旧装入,超预算丢最旧,最新用户输入永远保留 | `max_context_chars=80000` |
-| **无跨会话记忆** | 会话间互不串扰(隐私取向);Trace/Checkpoint/Evidence 为审计旁路,不进模型上下文 | — |
+| 存储 | SQLite + JSON/JSONL 文件(`.sessions/` 目录) | PostgreSQL 13 张表;消息/事件/证据用 JSONB,金额 NUMERIC |
+| 会话锁 | 进程内 `threading.Lock`(per-session),同会话并发请求排队等待 | Redis `SET NX PX` 分布式锁,TTL = run_timeout + 60s;冲突**立即 423**,不排队;释放走 Lua 持有者校验,只删自己的锁 |
+| LLM 限流 | 进程内 `BoundedSemaphore`(上限 4),超限 429 | Redis Lua 原子 check-and-incr(`llm:slots`),全集群共享额度,超限 429;键 TTL 120s 自愈 |
+| 登录态 | 文件会话库,7 天滑动过期,改密/删户清理本地记录 | Redis 令牌键(键名即 token 的 sha256 摘要,原文不落盘)7 天 TTL、剩余 <6 天滑动续期;`auth:user:*` 反向索引让改密/删户整批失效该用户全部令牌 |
+| 登录防护 | 进程内失败计数(dict + Lock,固定窗口),按用户名+IP 5 次锁定 10 分钟 | Redis Lua 原子 INCR+EXPIRE(`login:fail:{sha256}`,固定窗口从首次失败起算),两实例共享计数,任一实例记满即全集群锁定;成功登录清零 |
+| 审批恰好一次 | SQLite 条件 UPDATE(`WHERE status='pending'` + rowcount 判定) | **同一条 SQL 一字不改**(仅占位符 `?`→`%s`),PG 行锁保证并发 decide 恰好一个生效 |
+| 线程池 | `BoundedHTTPServer` 有界线程池(16 线程 / 32 排队,满载 503) | 原样保留,每实例独立;全局容量 = 实例数 × max_threads |
+| MCP | stdio 子进程随 web 自动拉起 | streamable-http 独立容器(bill-server :8010 / work-item-server :8020) |
 
-阈值均在 `AgentSpec` 上按 Agent 配置;压缩职责统一在引擎层,存储层只做持久化。
+### 环境变量
 
-### 评测体系
+`BILLGUARD_PG_DSN` 与 `BILLGUARD_REDIS_URL` 同时设置时,`python -m billguard.web` 进入分布式模式(此时两个 MCP URL 必须给出,否则启动退出);两者缺任一则退回单进程模式。compose 已内置下列值:
 
-**对抗评测**:用恶意脚本模型直接驱动真实 Parser、Harness、Registry、Policy、Checkpoint、Session 与沙箱组件,覆盖模型协议破坏、工具越权、Schema 注入、无限循环、参数/输出契约、提前结束、审批绕过/重放、Checkpoint 篡改、无证据数字、PII 泄露、资源预算、伪造审批身份、路径穿越、并发审批双提交、跨用户数据泄露。基线演进(每一步对应一次真实工程修复):
-
-| 轮次 | 结果 |
-| --- | --- |
-| 首轮 | 15/20 |
-| + 资源预算与脱敏门禁 | 19/20 |
-| + 身份层(登录/角色/服务端身份) | 20/20 |
-| + 并发加固(乐观并发/会话锁) | 21/21 |
-| + 数据隔离(owner 边界 + MCP 注入) | 22/22 |
-| + Skill 加固(共现触发词 + 不可信内容边界) | **23/23(100%)** |
-
-**路由评测**:50 条固定中文用例三组消融,Baseline 20% → Skills 100% → Full 100%;完成契约指标在该数据集为 N/A(由对抗探针与真实模型评测覆盖)。
-
-**真实模型评测**:每次评测创建隔离数据快照与临时 MCP 服务;日期相对评测日平移;工单用例只运行到审批 Checkpoint。模型客户端有界重试,连续 3 次基础设施错误自动熔断。报告含任务成功率、Skill 路由、工具选择与顺序、参数准确率、证据命中、数字 Groundedness、因果措辞安全、报告结构、审批违规率、重复稳定性、P95 延迟与 Token 汇总,写入 `.sessions/evaluations/`,可在 Web"自动评测"面板查看。
-
-### 项目结构
-
-```text
-billguard/
-├─ harness/            # Agent 内核:engine(受控循环/预算/安全停止)、spec、contracts(动态契约)、context
-├─ agents/             # 业务 Agent:bills.py(工具面)、planning.py(换载体示范)
-├─ skills.py           # Skill 发现/路由/白名单/完成规则
-├─ policy.py           # 风险分级 + Checkpoint 审批(条件 UPDATE 乐观并发)
-├─ bills.py            # 账单/类别/订阅存储 + 四类异常检测 + for_user 隔离视图
-├─ auth.py             # 用户/会话/能力矩阵(PBKDF2 + token 哈希)
-├─ web.py              # HTTP 层:鉴权门/能力路由/owner 注入/有界线程池
-├─ mcp_runtime.py      # MCP Host(闭包包装,具名参数注入免疫)
-├─ mcp_servers/        # bill_server / work_item_server
-├─ adversarial_evaluation.py  # 23 条对抗探针
-├─ evaluation.py / live_evaluation.py  # 路由消融 / 真实模型 E2E
-└─ web_static/         # 原生 JS 前端
-skills/                # 4 个 SKILL.md + routes.json(运行时加载)
-tests/                 # 171 项:并发竞态/隔离/契约/审批链路/记忆分层(llm_doubles 脚本模型)
-evals/                 # 50 路由用例 + 15 live 用例
-sample_data/           # 带剧本的合成账单(生成器在 scripts/)
-```
-
-### 当前边界
-
-- 企业级 SSO(OIDC/LDAP)尚未接入(单点身份解析锚点已预留);类别归类为关键词规则;脱敏为规则级,不替代企业级 DLP;PDF 依赖浏览器打印
-
-## 快速开始(功能预览)
-
-安装(见文末「一次性安装」)之后,日常启动只有一种形态——**一条命令,系统自动拉起全部组件**(账单 MCP、工单 MCP、审批网关):
-
-**三分钟演示剧本**(导入 `sample_data/bills_demo.csv` + `subscriptions_demo.csv` 后):
-
-1. 问守卫 Agent:**"最近有什么异常扣费"** → 检出腾讯视频涨价(预期 ¥15/月,8 月实扣 ¥25)
-2. 问:**"有没有重复扣费"** → 检出百度网盘同日 5 分钟内两笔 ¥18
-3. 问:**"生成本月守卫报告"** → 四章节报告(支出事实/异常清单/根因推测/行动计划)
-4. 问:**"帮我取消腾讯视频订阅"** → 自动发起工单,走完整三阶段人工审批(审批中心批准/拒绝)
-5. 演示完想重来?导入面板右下角"**清空我的数据**" → 重新导入
-
-## 命令速查
-
-### 快速启动
-
-```powershell
-# 在项目根目录执行;模型服务与参数按需替换,见下方"参考"
-$env:OPENROUTER_API_KEY="你的 Key"
-python -m billguard.web --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0.1:7897"
-```
-
-服务自动完成:用户鉴权检查、账单 MCP 子进程、工单 MCP 子进程、审批网关、有界线程池。带外工单管理仍可用 CLI(`work_item_server pending/approve/reject`,指向同一数据目录)。
-
-### 一次性安装(初次使用)
-
-```powershell
-# 在项目根目录执行
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e .
-
-# 首次启动前创建管理员(交互输两次密码,至少 8 位)
-python -m billguard.users add admin --role admin
-```
-
-### 参考:模型服务选择(OpenAI 兼容)
-
-```powershell
-# OpenRouter
-$env:OPENROUTER_API_KEY="你的 Key"
-python -m billguard.web --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0.1:7897"
-
-# DeepSeek 
-$env:OPENROUTER_API_KEY="你的 DeepSeek Key"
-python -m billguard.web --base-url "https://api.deepseek.com/v1" --model "deepseek-chat"
-
-```
-
-
-### 服务启动与参数
-
-| 参数 | 默认 | 说明 |
+| 变量 | compose 值 | 说明 |
 | --- | --- | --- |
-| --host / --port | 127.0.0.1 / 8000 | 监听地址与端口 |
-| --base-url | https://api.openai.com/v1 | 任意 OpenAI 兼容 API 地址 |
-| --model | gpt-4.1-mini | 模型名 |
-| --llm-proxy | 空 | 模型请求代理 |
-| --max-concurrent-llm | 4 | 模型并发上限,超限 429 |
-| --max-threads / --queue-capacity | 16 / 32 | HTTP 线程池与排队容量,满载 503 |
-| --run-timeout | 120s | 单次 Agent 运行总预算,超限安全停止 |
-| --data-dir | .sessions | 数据根目录 |
-| --mcp-timeout | 20s | MCP 子进程请求超时 |
-| --work-item-data-dir | .sessions/work-items | 工单数据目录(带外审批 CLI 与服务共用) |
+| `BILLGUARD_PG_DSN` | `postgresql://billguard:billguard@postgres:5432/billguard` | PG 连接串 |
+| `BILLGUARD_REDIS_URL` | `redis://redis:6379/0` | Redis 地址 |
+| `BILLGUARD_BILL_MCP_URL` | `http://bill-server:8010/mcp` | 账单 MCP(streamable-http) |
+| `BILLGUARD_WORK_ITEM_MCP_URL` | `http://work-item-server:8020/mcp` | 工单 MCP(streamable-http) |
+| `OPENROUTER_API_KEY` / `OPENAI_API_KEY` | 宿主机透传 | web 启动仅检查变量**存在**;宿主机未设置时 compose 注入占位值 `e2e-smoke-key`,足以让全部容器启动并完成基础设施冒烟,**不能完成真实模型调用** |
 
-### 用户管理 CLI
+> 注:spec §5.1 所列环境变量 `BILLGUARD_MAX_CONCURRENT_LLM` 未实现;集群 LLM 并发上限经 `--max-concurrent-llm` 参数传入(默认 4,与 spec §5.1 默认一致)。
 
-```powershell
-python -m billguard.users add <用户名> --role <admin|user>   # 建号,--password-stdin 可从管道读密码
-python -m billguard.users list
-python -m billguard.users set-role <用户名> --role <角色>
-python -m billguard.users reset-password <用户名>
-python -m billguard.users disable <用户名> / enable <用户名>
+### 设计决策
+
+- **为什么 423 而不是排队**:分布式锁不加等待队列——跨实例的等待队列要处理排队者生命周期(实例死亡时的清理、公平性、超时传递),复杂度与收益不成比例。立即 423 让客户端显式重试,语义简单可预测;锁 TTL(run_timeout + 60s)兜底实例崩溃,不会永久占锁。
+- **TTL 自愈的代价**:`llm:slots` 计数器设 120s TTL,实例崩溃后最迟 120s 恢复满额度;代价是 TTL 到期边界可能短暂多放 1-2 个请求(演示定位可接受)。会话锁同理:崩溃后最迟 run_timeout + 60s 自动释放,期间该会话请求 423。
+- **审批 SQL 为何一字不改**:恰好一次语义由"条件 UPDATE + rowcount==0 即拒绝"表达,与存储引擎无关;SQLite→PG 只换占位符,PG 行锁天然串行化并发 decide。不动这条 SQL,意味着"并发审批双提交"对抗探针验证的就是同一份逻辑,行为可证等价。
+- **ip_hash 的作用**:同一客户端 IP 固定路由到同一 web 实例,减少 Redis 锁竞争与 423 概率;非必需——正确性只依赖 Redis/PG 的互斥,轮询负载均衡同样正确。
+
+## 启动与命令
+
+以下命令均在仓库根目录执行;集群冒烟验收的完整步骤见 `docker/cluster-smoke.md`。
+
+### 首次启动
+
+```bash
+docker compose up --build -d postgres redis
+# 播种管理员(镜像 ENTRYPOINT 已是 python,命令不写 python 前缀;
+# pgdata 卷保留时只需做一次)
+echo 'Smoke-Admin-1' | docker compose run --rm web-1 \
+  -m billguard.users add admin --role admin --password-stdin
+docker compose up --build -d
+docker compose ps   # 全部服务 Up,postgres/redis 显示 healthy
 ```
 
-保护约束:不能禁用/删除自己,不能动最后一个启用中的 admin;删除用户会级联删除其全部账单数据。
+真实对话需先在宿主机 `export OPENROUTER_API_KEY=...`(或 `OPENAI_API_KEY`)再 `up -d`。入口 `http://127.0.0.1:8080`;健康检查 `curl -s http://127.0.0.1:8080/api/health` 期望 `{"ok": true}`。
 
-### 评测命令
+### 日常启停
 
-```powershell
-# 对抗评测(确定性,零费用)—— 22 条攻击探针
-python -m billguard.adversarial_eval
-
-# 路由评测(确定性,零费用)—— 64 条用例三组消融
-python -m billguard.eval --variant compare
-
-# 真实模型端到端评测(产生 API 费用)
-$env:OPENROUTER_API_KEY="你的 Key"
-python -m billguard.live_eval --limit 3 --proxy "http://127.0.0.1:7897" --confirm-live   # 冒烟
-python -m billguard.live_eval --repeats 3 --proxy "http://127.0.0.1:7897" --confirm-live # 稳定性(15×3)
-python -m billguard.live_eval --cases "7-10,12-15" --proxy "http://127.0.0.1:7897" --confirm-live  # 只回归指定用例
+```bash
+docker compose up -d      # 启动全部服务
+docker compose down       # 停止并删容器(保留 pgdata 卷与 admin 账号)
+docker compose down -v    # 全量重置(下次 up 需重新播种 admin)
+docker compose kill web-1 # 故障转移演练:nginx 自动切到 web-2
+docker compose start web-1   # 恢复双实例
+docker compose restart nginx # web 容器重建后必做(见下)
 ```
 
+web-1/web-2 被**重建**(`up --build` 或 `down` 后再 `up`)会拿到新容器 IP,而 nginx 的静态 upstream 只在 nginx 启动时解析一次 → 502 Bad Gateway;此时 `docker compose restart nginx` 重新解析即可。`kill`/`start` 复用同一容器、IP 不变,无此问题。
 
-### 测试
+### 备份与容量
 
-```powershell
-python -m unittest discover -s tests -v
+备份一条命令;恢复:清库后用 `psql` 重放 `backup.sql`,或 `docker compose down -v` 后由 `docker/init.sql` 重建表结构再重放。
+
+```bash
+docker compose exec -T postgres pg_dump -U billguard billguard > backup.sql
 ```
 
-当前 **171 项**:并发竞态专项、身份与隔离、运行时加固、记忆分层(脚本模型驱动)。
+容量:每个 web 实例 PG 连接池 min 2 / max 8,默认部署 2 实例 = 最多 16 连接(PG 默认上限 100);水平扩实例时按此换算连接占用量。
 
+### 测试(宿主机)
+
+前置:`docker compose up -d postgres redis`(套件连 PG `127.0.0.1:5433` / Redis `127.0.0.1:6380`)。
+
+```bash
+python -X utf8 -m unittest discover -s tests
+# 期望:Ran 216 tests ... OK
+```
+
+注意:套件会清空 users 表;之后起集群需重跑首次启动的播种命令再 `up -d web-1 web-2`。
+
+### 对抗评测
+
+```bash
+# 宿主机(缺省连 compose 宿主机端口 PG 5433 / Redis 6380)
+python -X utf8 -m billguard.adversarial_eval
+# 集群内(容器网络)
+docker compose exec web-1 python -m billguard.adversarial_eval
+# 期望:metrics "total": 23, "passed": 23, "failed": 0
+```
+
+评测为确定性本地探针(恶意脚本模型替身),不需要真实 Key;会清空业务表(users 仅删夹具 alice/mallory,不影响 admin),不要在存有真实数据的库上执行。
+
+### 集群冒烟验收
+
+完整手册见 `docker/cluster-smoke.md`:A 部分自动化冒烟(无 Key)覆盖健康检查、跨实例会话锁 423、kill web-1 故障转移、集群内对抗评测、零残留核验;B 部分手工验收(真实 Key)覆盖真实对话、同会话并发竞争(一 200 一 423)、实例切换后的会话连续性。路由评测在集群内执行:`docker compose exec web-1 python -m billguard.eval`。

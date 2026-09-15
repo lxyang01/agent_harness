@@ -1,0 +1,105 @@
+# CI:distributed 分支全量验证 —— 208 项单元测试 + 23 条对抗探针,
+# 跑在真实 PostgreSQL / Redis 服务容器上(与宿主机 compose 相同端口 5433/6380)。
+# 徽章:https://github.com/lxyang01/agent_harness/actions/workflows/ci.yml/badge.svg?branch=distributed
+name: CI
+
+on:
+  push:
+    branches: [distributed]
+  pull_request:
+    branches: [distributed]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: billguard
+          POSTGRES_PASSWORD: billguard
+          POSTGRES_DB: billguard
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U billguard"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      # 服务容器健康探测通过后仍需一小段时间完成角色初始化,保守重试 ≤30s
+      - name: Wait for services (PG 5433 / Redis 6380)
+        run: |
+          python -X utf8 - <<'EOF'
+          import time
+          import psycopg, redis
+          for attempt in range(31):
+              try:
+                  psycopg.connect(
+                      "postgresql://billguard:billguard@127.0.0.1:5433/billguard",
+                      connect_timeout=2).close()
+                  assert redis.Redis.from_url(
+                      "redis://127.0.0.1:6380/0").ping()
+                  print("services ready")
+                  break
+              except Exception as exc:
+                  print(f"waiting for services ({attempt}): {exc}")
+                  time.sleep(1)
+          else:
+              raise SystemExit("PG/Redis not reachable after 30s")
+          EOF
+
+      # 服务容器不跑 docker-entrypoint-initdb.d(init.sql 未挂载),
+      # 由本步骤用 psycopg 以单次多语句 execute 铺表(本地已验证 13 表幂等)
+      - name: Apply docker/init.sql
+        run: |
+          python -X utf8 - <<'EOF'
+          from pathlib import Path
+          import psycopg
+          sql = Path("docker/init.sql").read_text(encoding="utf-8")
+          with psycopg.connect(
+                  "postgresql://billguard:billguard@127.0.0.1:5433/billguard") as conn:
+              conn.execute(sql)
+              tables = conn.execute(
+                  "SELECT count(*) FROM pg_tables WHERE schemaname='public'"
+              ).fetchone()[0]
+          print(f"applied init.sql: {tables} tables in public schema")
+          assert tables == 13, f"expected 13 tables, got {tables}"
+          EOF
+
+      - name: Unit tests (expect 208 OK)
+        run: python -X utf8 -m unittest discover -s tests
+
+      # adversarial_eval 的 main() 无论探针成败都以 0 退出,
+      # 故打印 metrics 后用 grep 校验 "failed": 0(期望 23/23);
+      # pipefail 让 python 自身崩溃也直接判失败,不依赖 grep 兜底
+      - name: Adversarial evaluation (expect 23/23)
+        run: |
+          set -o pipefail
+          python -X utf8 -m billguard.adversarial_eval \
+            --output-dir "$RUNNER_TEMP/adv-eval" --report "" \
+            | tee "$RUNNER_TEMP/adv-metrics.json"
+          grep -q '"failed": 0' "$RUNNER_TEMP/adv-metrics.json"
+          echo "adversarial metrics verified: failed = 0"

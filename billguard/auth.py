@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 
 ROLES = ("admin", "user")
@@ -296,9 +296,14 @@ def clear_session_cookie() -> str:
 
 
 class Authenticator:
-    """Single identity-resolution boundary; swap this class for SSO later."""
+    """Single identity-resolution boundary; swap this class for SSO later.
 
-    def __init__(self, users: UserStore, sessions: AuthSessionStore) -> None:
+    users/sessions 为鸭子类型后端,调用面不变:
+    - 单进程:UserStore / AuthSessionStore(SQLite,consume 语义)
+    - 分布式:PGUserStore / RedisAuthSessions(resolve 语义,Redis 滑动续期)
+    Cookie/token 机制(解析、下发、登出)与两种后端完全无关。"""
+
+    def __init__(self, users: Any, sessions: Any) -> None:
         self.users = users
         self.sessions = sessions
 
@@ -311,11 +316,19 @@ class Authenticator:
         if token:
             self.sessions.delete(token)
 
+    def _consume_session(self, token: str) -> str | None:
+        """AuthSessionStore.consume 与 RedisAuthSessions.resolve 同语义
+        (校验 token 并按阈值滑动续期),按后端实际提供的方法适配。"""
+        consume = getattr(self.sessions, "consume", None)
+        if consume is not None:
+            return consume(token)
+        return self.sessions.resolve(token)
+
     def resolve_user(self, headers) -> User:
         token = session_token_from_cookie(headers.get("Cookie", ""))
         if not token:
             raise AuthError("未登录或会话已失效")
-        username = self.sessions.consume(token)
+        username = self._consume_session(token)
         if username is None:
             raise AuthError("登录已过期,请重新登录")
         user = self.users.get(username)  # 用户被删除则失败

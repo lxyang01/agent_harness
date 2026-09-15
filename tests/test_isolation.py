@@ -7,9 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from billguard.bills import BillService
 from billguard.mcp_runtime import MCPClientManager
+from billguard.storage_pg import (
+    PGBillService, PGEvidenceStore, PGSessionStore, PGTraceStore,
+)
 from billguard.tools import Tool, ToolError, ToolRegistry
+
+from tests.conftest import StoreTestCase
 
 DEMO = ("tx_id,paid_at,merchant,category,amount,method,note\n"
         "TX-1,2026-08-05 21:00:00,腾讯视频,订阅,25.0,微信,月费\n")
@@ -18,123 +22,115 @@ DEMO_LEGACY_TX = ("tx_id,paid_at,merchant,category,amount,method,note\n"
                   "TX-L,2026-08-05 22:00:00,水电费,居住,60.0,微信,存量账单\n")
 
 
-class ScopedDataTests(unittest.TestCase):
+class ScopedDataTests(StoreTestCase):
     def test_user_b_cannot_see_user_a_data(self):
-        with tempfile.TemporaryDirectory() as temp:
-            service = BillService(Path(temp))
-            alice = service.for_user("alice")
-            bob = service.for_user("bob")
-            result = alice.import_bills("demo.csv", DEMO)
-            self.assertEqual(1, result["imported_rows"])
-            self.assertEqual(0, bob.overview()["count"])
-            self.assertEqual([], bob.query()["items"])
-            self.assertEqual([], bob.anomalies(31, "price_hike", 10)["items"])
+        service = PGBillService(self.pool)
+        alice = service.for_user("alice")
+        bob = service.for_user("bob")
+        result = alice.import_bills("demo.csv", DEMO)
+        self.assertEqual(1, result["imported_rows"])
+        self.assertEqual(0, bob.overview()["count"])
+        self.assertEqual([], bob.query()["items"])
+        self.assertEqual([], bob.anomalies(31, "price_hike", 10)["items"])
 
     def test_admin_sees_legacy_null_rows_others_do_not(self):
-        with tempfile.TemporaryDirectory() as temp:
-            service = BillService(Path(temp))
-            # 根句柄写入(NULL owner,模拟存量)
-            service.import_bills("legacy.csv", DEMO)
-            admin = service.for_user("admin")
-            bob = service.for_user("bob")
-            self.assertEqual(1, admin.overview()["count"])
-            self.assertEqual(0, bob.overview()["count"])
+        service = PGBillService(self.pool)
+        # 根句柄写入(NULL owner,模拟存量)
+        service.import_bills("legacy.csv", DEMO)
+        admin = service.for_user("admin")
+        bob = service.for_user("bob")
+        self.assertEqual(1, admin.overview()["count"])
+        self.assertEqual(0, bob.overview()["count"])
 
     def test_cross_owner_workflow_update_is_noop(self):
-        with tempfile.TemporaryDirectory() as temp:
-            service = BillService(Path(temp))
-            alice = service.for_user("alice")
-            alice.import_bills("demo.csv", DEMO)
-            result = service.for_user("bob").update_workflow(
-                ["TX-1"], "bob", status="待核查")
-            self.assertEqual(0, result["count"])
+        service = PGBillService(self.pool)
+        alice = service.for_user("alice")
+        alice.import_bills("demo.csv", DEMO)
+        result = service.for_user("bob").update_workflow(
+            ["TX-1"], "bob", status="待核查")
+        self.assertEqual(0, result["count"])
 
     def test_first_for_user_seeds_default_categories(self):
-        with tempfile.TemporaryDirectory() as temp:
-            service = BillService(Path(temp))
-            categories = service.for_user("bob").categories()
-            names = {item["name"] for item in categories}
-            self.assertIn("餐饮", names)
-            self.assertIn("订阅", names)
+        service = PGBillService(self.pool)
+        categories = service.for_user("bob").categories()
+        names = {item["name"] for item in categories}
+        self.assertIn("餐饮", names)
+        self.assertIn("订阅", names)
 
     def test_same_csv_imports_independently_per_owner(self):
-        with tempfile.TemporaryDirectory() as temp:
-            service = BillService(Path(temp))
-            alice = service.for_user("alice")
-            bob = service.for_user("bob")
-            first = alice.import_bills("demo.csv", DEMO)
-            second = bob.import_bills("demo.csv", DEMO)
-            # 相同编号的账单文件,各 owner 各自完整入库
-            self.assertEqual(first["imported_rows"], second["imported_rows"])
-            self.assertEqual(0, second["duplicate_rows"])
-            self.assertEqual(1, alice.overview()["count"])
-            self.assertEqual(1, bob.overview()["count"])
-            # 同一 owner 重复导入仍按自己的数据去重
-            again = alice.import_bills("demo.csv", DEMO)
-            self.assertEqual(0, again["imported_rows"])
-            self.assertEqual(1, again["duplicate_rows"])
-            # 同编号交易的工单/审计按 owner 作用域
-            result = bob.update_workflow(["TX-1"], "bob", status="待核查")
-            self.assertEqual(1, result["count"])
-            self.assertEqual("正常", alice.query()["items"][0]["status"])
-            self.assertEqual("待核查", bob.query()["items"][0]["status"])
-            self.assertEqual(1, len(bob.transaction_audits("TX-1")))
+        service = PGBillService(self.pool)
+        alice = service.for_user("alice")
+        bob = service.for_user("bob")
+        first = alice.import_bills("demo.csv", DEMO)
+        second = bob.import_bills("demo.csv", DEMO)
+        # 相同编号的账单文件,各 owner 各自完整入库
+        self.assertEqual(first["imported_rows"], second["imported_rows"])
+        self.assertEqual(0, second["duplicate_rows"])
+        self.assertEqual(1, alice.overview()["count"])
+        self.assertEqual(1, bob.overview()["count"])
+        # 同一 owner 重复导入仍按自己的数据去重
+        again = alice.import_bills("demo.csv", DEMO)
+        self.assertEqual(0, again["imported_rows"])
+        self.assertEqual(1, again["duplicate_rows"])
+        # 同编号交易的工单/审计按 owner 作用域
+        result = bob.update_workflow(["TX-1"], "bob", status="待核查")
+        self.assertEqual(1, result["count"])
+        self.assertEqual("正常", alice.query()["items"][0]["status"])
+        self.assertEqual("待核查", bob.query()["items"][0]["status"])
+        self.assertEqual(1, len(bob.transaction_audits("TX-1")))
 
     def test_update_transaction_category_within_owner_scope(self):
-        with tempfile.TemporaryDirectory() as temp:
-            service = BillService(Path(temp))
-            bob = service.for_user("bob")
-            alice = service.for_user("alice")
-            bob.import_bills("demo.csv", DEMO)
-            alice.import_bills("demo.csv", DEMO)
-            result = bob.update_transaction_category("TX-1", "娱乐")
-            self.assertEqual("订阅", result["old_category"])
-            self.assertEqual("娱乐", result["new_category"])
-            row = next(item for item in bob.query()["items"] if item["tx_id"] == "TX-1")
-            self.assertEqual("娱乐", row["category"])
-            audits = bob.transaction_audits("TX-1")
-            self.assertEqual("bob", audits[-1]["owner"])
-            self.assertEqual("web-user", audits[-1]["operator"])
-            # 同号交易的另一 owner 行不受影响
-            alice_row = next(item for item in alice.query()["items"] if item["tx_id"] == "TX-1")
-            self.assertEqual("订阅", alice_row["category"])
+        service = PGBillService(self.pool)
+        bob = service.for_user("bob")
+        alice = service.for_user("alice")
+        bob.import_bills("demo.csv", DEMO)
+        alice.import_bills("demo.csv", DEMO)
+        result = bob.update_transaction_category("TX-1", "娱乐")
+        self.assertEqual("订阅", result["old_category"])
+        self.assertEqual("娱乐", result["new_category"])
+        row = next(item for item in bob.query()["items"] if item["tx_id"] == "TX-1")
+        self.assertEqual("娱乐", row["category"])
+        audits = bob.transaction_audits("TX-1")
+        self.assertEqual("bob", audits[-1]["owner"])
+        self.assertEqual("web-user", audits[-1]["operator"])
+        # 同号交易的另一 owner 行不受影响
+        alice_row = next(item for item in alice.query()["items"] if item["tx_id"] == "TX-1")
+        self.assertEqual("订阅", alice_row["category"])
 
     def test_same_tx_audit_rows_do_not_bleed_across_owners(self):
         # 终审 CRITICAL:同号交易的审计行(tx_audits)自带 owner 戳,必须按
         # owner 过滤——只看交易归属会把共享 tx_id 的他人审计(operator/note)带出
-        with tempfile.TemporaryDirectory() as temp:
-            service = BillService(Path(temp))
-            alice = service.for_user("alice")
-            bob = service.for_user("bob")
-            alice.import_bills("demo.csv", DEMO)
-            bob.import_bills("demo.csv", DEMO)
-            alice.update_workflow(["TX-1"], "alice", status="待核查", note="alice 的备注")
-            bob.update_workflow(["TX-1"], "bob", status="已忽略", note="bob 的备注")
-            alice_audits = alice.transaction_audits("TX-1")
-            bob_audits = bob.transaction_audits("TX-1")
-            self.assertEqual(1, len(alice_audits))
-            self.assertEqual("alice", alice_audits[0]["operator"])
-            self.assertNotIn("bob", alice_audits[0]["new_value"])
-            self.assertEqual(1, len(bob_audits))
-            self.assertEqual("bob", bob_audits[0]["operator"])
-            self.assertNotIn("alice", bob_audits[0]["new_value"])
-            # admin 视野 = 自身 + 存量 NULL 行:两位用户的审计都不串入
-            admin = service.for_user("admin")
-            self.assertEqual([], admin.transaction_audits("TX-1"))
-            # 存量 NULL 审计行对 admin 仍可见(owner 过滤不改变既有语义)
-            service.import_bills("legacy.csv", DEMO_LEGACY_TX)
-            service.update_workflow(["TX-L"], "root", status="核查中")
-            legacy = admin.transaction_audits("TX-L")
-            self.assertEqual(1, len(legacy))
-            self.assertIsNone(legacy[0]["owner"])
+        service = PGBillService(self.pool)
+        alice = service.for_user("alice")
+        bob = service.for_user("bob")
+        alice.import_bills("demo.csv", DEMO)
+        bob.import_bills("demo.csv", DEMO)
+        alice.update_workflow(["TX-1"], "alice", status="待核查", note="alice 的备注")
+        bob.update_workflow(["TX-1"], "bob", status="已忽略", note="bob 的备注")
+        alice_audits = alice.transaction_audits("TX-1")
+        bob_audits = bob.transaction_audits("TX-1")
+        self.assertEqual(1, len(alice_audits))
+        self.assertEqual("alice", alice_audits[0]["operator"])
+        self.assertNotIn("bob", alice_audits[0]["new_value"])
+        self.assertEqual(1, len(bob_audits))
+        self.assertEqual("bob", bob_audits[0]["operator"])
+        self.assertNotIn("alice", bob_audits[0]["new_value"])
+        # admin 视野 = 自身 + 存量 NULL 行:两位用户的审计都不串入
+        admin = service.for_user("admin")
+        self.assertEqual([], admin.transaction_audits("TX-1"))
+        # 存量 NULL 审计行对 admin 仍可见(owner 过滤不改变既有语义)
+        service.import_bills("legacy.csv", DEMO_LEGACY_TX)
+        service.update_workflow(["TX-L"], "root", status="核查中")
+        legacy = admin.transaction_audits("TX-L")
+        self.assertEqual(1, len(legacy))
+        self.assertIsNone(legacy[0]["owner"])
 
     def test_for_user_rejects_empty_owner(self):
-        with tempfile.TemporaryDirectory() as temp:
-            service = BillService(Path(temp))
-            with self.assertRaises(ToolError):
-                service.for_user("")
-            with self.assertRaises(ToolError):
-                service.for_user("   ")
+        service = PGBillService(self.pool)
+        with self.assertRaises(ToolError):
+            service.for_user("")
+        with self.assertRaises(ToolError):
+            service.for_user("   ")
 
 
 DEMO_BOB = ("tx_id,paid_at,merchant,category,amount,method,note\n"
@@ -144,50 +140,59 @@ DEMO_PII = ("tx_id,paid_at,merchant,category,amount,method,note\n"
             "TX-3,2026-08-07 09:00:00,腾讯云,订阅,99.0,微信,订单号 SO-ABCD12345\n")
 
 
-class WebScopedTests(unittest.TestCase):
+class WebScopedTests(StoreTestCase):
+    def build_app(self, llm):
+        from billguard.web import BillGuardApp
+        return BillGuardApp(
+            self._web_root(), self._web_root() / "docs", llm,
+            bills=PGBillService(self.pool),
+            session_store=PGSessionStore(self.pool),
+            evidence_store=PGEvidenceStore(self.pool),
+            trace_store=PGTraceStore(self.pool),
+            redis_client=self.redis,
+        )
+
+    def _web_root(self) -> Path:
+        if not hasattr(self, "_web_temp"):
+            self._web_temp = tempfile.TemporaryDirectory()
+            self.addCleanup(self._web_temp.cleanup)
+        return Path(self._web_temp.name)
+
     def test_two_users_isolated_through_app(self):
         from tests.llm_doubles import FinalLLM
         from billguard.auth import User
-        from billguard.web import BillGuardApp
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            app = BillGuardApp(root / "sessions", root / "docs", FinalLLM())
-            alice, bob = User("alice", "user"), User("bob", "user")
-            app.import_bills(alice, {"filename": "d.csv", "csv_text": DEMO})
-            self.assertEqual(0, app.snapshot(bob, "s1")["overview"]["count"])
-            self.assertEqual(1, app.snapshot(alice, "s1")["overview"]["count"])
+        app = self.build_app(FinalLLM())
+        alice, bob = User("alice", "user"), User("bob", "user")
+        app.import_bills(alice, {"filename": "d.csv", "csv_text": DEMO})
+        self.assertEqual(0, app.snapshot(bob, "s1")["overview"]["count"])
+        self.assertEqual(1, app.snapshot(alice, "s1")["overview"]["count"])
 
     def test_bob_chat_answers_with_own_data_only(self):
         from tests.llm_doubles import ScriptedLLM
         from billguard.auth import User
-        from billguard.web import BillGuardApp
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            app = BillGuardApp(root / "sessions", root / "docs", ScriptedLLM([
-                {"thought": "查本人总览", "tool_call": {"name": "bill_overview", "arguments": {}}},
-                {"thought": "done", "final": "共 1 笔支出(美团外卖)。"},
-            ]))
-            alice, bob = User("alice", "user"), User("bob", "user")
-            app.import_bills(alice, {"filename": "a.csv", "csv_text": DEMO})
-            app.import_bills(bob, {"filename": "b.csv", "csv_text": DEMO_BOB})
-            # 本地模式 registry 按 bob 装配:bill_overview 只见 bob 自己的行
-            result = app.chat(bob, "s-bob", "总结一下当前的支出情况")
-            self.assertIn("1 笔支出", result["answer"])
-            self.assertIn("美团外卖", result["answer"])
-            self.assertNotIn("腾讯视频", result["answer"])
-            self.assertEqual(1, result["overview"]["count"])
+        app = self.build_app(ScriptedLLM([
+            {"thought": "查本人总览", "tool_call": {"name": "bill_overview", "arguments": {}}},
+            {"thought": "done", "final": "共 1 笔支出(美团外卖)。"},
+        ]))
+        alice, bob = User("alice", "user"), User("bob", "user")
+        app.import_bills(alice, {"filename": "a.csv", "csv_text": DEMO})
+        app.import_bills(bob, {"filename": "b.csv", "csv_text": DEMO_BOB})
+        # 本地模式 registry 按 bob 装配:bill_overview 只见 bob 自己的行
+        result = app.chat(bob, "s-bob", "总结一下当前的支出情况")
+        self.assertIn("1 笔支出", result["answer"])
+        self.assertIn("美团外卖", result["answer"])
+        self.assertNotIn("腾讯视频", result["answer"])
+        self.assertEqual(1, result["overview"]["count"])
 
     def test_scoped_registry_search_works_and_masks(self):
         # 受限视图须透传纯文本脱敏助手,bill_search 命中行时才不会炸
         from billguard.agents import build_bill_registry
-        from billguard.bills import BillService
-        with tempfile.TemporaryDirectory() as temp:
-            service = BillService(Path(temp))
-            service.for_user("bob").import_bills("b.csv", DEMO_PII)
-            registry = build_bill_registry(service.for_user("bob"))
-            result = registry.execute("bill_search", {"query": "腾讯", "limit": 5})
-            self.assertEqual(1, result["total"])
-            self.assertIn("[订单号]", result["items"][0]["note"])
+        service = PGBillService(self.pool)
+        service.for_user("bob").import_bills("b.csv", DEMO_PII)
+        registry = build_bill_registry(service.for_user("bob"))
+        result = registry.execute("bill_search", {"query": "腾讯", "limit": 5})
+        self.assertEqual(1, result["total"])
+        self.assertIn("[订单号]", result["items"][0]["note"])
 
 
 DEMO_ALICE = ("tx_id,paid_at,merchant,category,amount,method,note\n"
@@ -195,11 +200,11 @@ DEMO_ALICE = ("tx_id,paid_at,merchant,category,amount,method,note\n"
 
 
 class _OwnerProbeManager:
-    """MCP 假管理器:bill.* 工具直达真实 BillService,并记录每次调用到达服务的 owner。
+    """MCP 假管理器:bill.* 工具直达真实账单服务,并记录每次调用到达服务的 owner。
     schema 与真实 FastMCP 广播形态同构:owner 在 properties、不在 required、
     无 additionalProperties 限制(伪造的 owner 参数可以到达 handler,由包装层覆盖)。"""
 
-    def __init__(self, service: BillService) -> None:
+    def __init__(self, service) -> None:
         self.service = service
         self.seen_owners: list[str | None] = []
         self.seen_calls: list[dict] = []
@@ -253,11 +258,10 @@ class _OwnerProbeManager:
         return {"count": 0}
 
 
-class OwnerInjectionTests(unittest.TestCase):
+class OwnerInjectionTests(StoreTestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.service = BillService(Path(self.temp.name))
+        super().setUp()
+        self.service = PGBillService(self.pool)
         self.service.import_bills("legacy.csv", DEMO)  # owner=None → 存量 NULL 行
         self.service.for_user("alice").import_bills("alice.csv", DEMO_ALICE)
         self.manager = _OwnerProbeManager(self.service)
@@ -304,12 +308,23 @@ class OwnerInjectionTests(unittest.TestCase):
         from tests.llm_doubles import FinalLLM
         from billguard.auth import User
         from billguard.web import BillGuardApp
-        app = BillGuardApp(Path(self.temp.name) / "web", Path(self.temp.name) / "docs",
-                           FinalLLM(), self.manager)
+        app = BillGuardApp(Path(self._temp_root()) / "web", Path(self._temp_root()) / "docs",
+                           FinalLLM(), self.manager,
+                           bills=PGBillService(self.pool),
+                           session_store=PGSessionStore(self.pool),
+                           evidence_store=PGEvidenceStore(self.pool),
+                           trace_store=PGTraceStore(self.pool),
+                           redis_client=self.redis)
         agent = app._agent(User("alice", "user"), "s-inject")
         result = agent.tools.execute("bill.aggregate", {"owner": "mallory"})
         self.assertEqual(["alice"], self.manager.seen_owners)
         self.assertEqual(1, result["count"])
+
+    def _temp_root(self) -> str:
+        if not hasattr(self, "_app_temp"):
+            self._app_temp = tempfile.TemporaryDirectory()
+            self.addCleanup(self._app_temp.cleanup)
+        return self._app_temp.name
 
     def test_named_parameter_collision_cannot_override_identity(self):
         # 包装函数不得有具名参数:模型显式传 _owner 同名关键字会覆盖默认绑定
