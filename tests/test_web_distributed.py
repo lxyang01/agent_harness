@@ -70,6 +70,11 @@ class DistributedTestCase(unittest.TestCase):
 
     def _cleanup(self) -> None:
         self.client.delete(*self._redis_keys)
+        # 令牌键经 track 原始 DEL,不走 SREM;同步清按用户反向索引键
+        # (auth:user:*,与 tests/conftest.sweep_redis 的扫除方式一致;空集不 DEL)
+        index_keys = list(self.client.scan_iter(match="auth:user:*"))
+        if index_keys:
+            self.client.delete(*index_keys)
         self.pool.close()
         self.client.close()
         self.temp.cleanup()
