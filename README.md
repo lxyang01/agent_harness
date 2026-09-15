@@ -178,7 +178,7 @@ sample_data/           # 带剧本的合成账单(生成器在 scripts/)
 
 ## 快速开始(功能预览)
 
-安装(见文末「一次性安装」)之后,日常启动只有一种形态——**一条命令,系统自动拉起全部组件**(账单 MCP、工单 MCP、审批网关),不需要另开任何窗口:
+安装(见文末「一次性安装」)之后,日常启动只有一种形态——**一条命令,系统自动拉起全部组件**(账单 MCP、工单 MCP、审批网关):
 
 **三分钟演示剧本**(导入 `sample_data/bills_demo.csv` + `subscriptions_demo.csv` 后):
 
@@ -190,7 +190,7 @@ sample_data/           # 带剧本的合成账单(生成器在 scripts/)
 
 ## 命令速查
 
-### 日常启动(唯一需要记的)
+### 快速启动
 
 ```powershell
 # 在项目根目录执行;模型服务与参数按需替换,见下方"参考"
@@ -200,7 +200,7 @@ python -m billguard.web --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0
 
 服务自动完成:用户鉴权检查、账单 MCP 子进程、工单 MCP 子进程、审批网关、有界线程池。带外工单管理仍可用 CLI(`work_item_server pending/approve/reject`,指向同一数据目录)。
 
-### 一次性安装(新人)
+### 一次性安装(初次使用)
 
 ```powershell
 # 在项目根目录执行
@@ -215,17 +215,16 @@ python -m billguard.users add admin --role admin
 ### 参考:模型服务选择(OpenAI 兼容)
 
 ```powershell
-# OpenRouter(需代理;--base-url 默认即此,故日常启动未显式传)
+# OpenRouter
 $env:OPENROUTER_API_KEY="你的 Key"
 python -m billguard.web --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0.1:7897"
 
-# DeepSeek 官方(直连,无需代理)
+# DeepSeek 
 $env:OPENROUTER_API_KEY="你的 DeepSeek Key"
 python -m billguard.web --base-url "https://api.deepseek.com/v1" --model "deepseek-chat"
 
 ```
 
-不要将 API Key 写入代码或提交到 Git。
 
 ### 服务启动与参数
 
@@ -270,7 +269,6 @@ python -m billguard.live_eval --repeats 3 --proxy "http://127.0.0.1:7897" --conf
 python -m billguard.live_eval --cases "7-10,12-15" --proxy "http://127.0.0.1:7897" --confirm-live  # 只回归指定用例
 ```
 
-没有 `--confirm-live` 时只显示计划、不发起 API 调用。
 
 ### 测试
 
