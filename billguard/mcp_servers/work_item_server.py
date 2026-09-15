@@ -9,6 +9,8 @@ from typing import Any, Literal
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from . import apply_streamable_bind
+
 from ..work_items import WorkItemStore
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False,
@@ -140,8 +142,8 @@ def main() -> None:
     host = getattr(args, "host", "127.0.0.1")
     port = getattr(args, "port", 8020)
     transport = getattr(args, "transport", "streamable-http")
-    server.settings.host = host
-    server.settings.port = port
+    # 按最终绑定地址重算 DNS 重绑定防护(否则 0.0.0.0 下服务名 Host 被 421)
+    apply_streamable_bind(server, host, port)
     server.run(transport=transport)
 
 

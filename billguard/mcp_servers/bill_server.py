@@ -9,6 +9,8 @@ from typing import Any, Literal
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from . import apply_streamable_bind
+
 from ..bills import (
     DEFAULT_CATEGORIES,
     DUPLICATE_WINDOW_DAYS,
@@ -245,8 +247,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8010)
     args = parser.parse_args()
     server = build_server(args.data_dir)
-    server.settings.host = args.host
-    server.settings.port = args.port
+    # 按最终绑定地址重算 DNS 重绑定防护(否则 0.0.0.0 下服务名 Host 被 421)
+    apply_streamable_bind(server, args.host, args.port)
     server.run(transport=args.transport)
 
 

@@ -32,6 +32,11 @@ services:
     environment: &web_env
       BILLGUARD_PG_DSN: postgresql://billguard:billguard@postgres:5432/billguard
       BILLGUARD_REDIS_URL: redis://redis:6379/0
+      # API Key 透传:web 启动仅检查变量存在,缺省占位值让容器可启动供基础设施
+      # 冒烟(健康/会话锁/故障转移/对抗评测均不需要真实 Key);真实对话请在
+      # 宿主机 export OPENROUTER_API_KEY(或 OPENAI_API_KEY)后 up -d。
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-e2e-smoke-key}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-e2e-smoke-key}
     volumes: [billdata:/data]
 
   work-item-server:
