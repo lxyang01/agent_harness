@@ -74,12 +74,6 @@ class RequestContract:
 
 _MAX_ROWS = re.compile(r"最多\s*(?:返回|读取|给出)?\s*(\d+)\s*条([^，。；,;]{0,10})")
 _TOP_ITEMS = re.compile(r"(?:返回|给出|列出)?\s*前\s*(\d+)\s*项")
-_REPORT_TERMS = ("周报", "月报", "管理层报告", "生成报告", "汇报")
-# monthly-guard-report 的报告型触发词沿用 legacy 的强报告名词口径（不收录
-# 裸“报告/总结”，避免误伤复合激活下的普通概览问法），仅补充账单域名词
-# “守卫报告”，与路由 triggers 中的守卫报告保持一致。
-_BILL_REPORT_TERMS = ("周报", "月报", "守卫报告", "汇报")
-
 _SECTION_CATALOG = {
     "执行摘要": OutputSection("执行摘要", ("执行摘要", "摘要", "summary", "executive_summary")),
     "数据事实": OutputSection("数据事实", ("数据事实", "数据概览", "data_facts", "facts")),
@@ -102,7 +96,9 @@ _BILL_REPORT_SECTIONS = ("支出事实", "异常清单", "根因推测", "行动
 
 
 def compile_request_contract(user_input: str,
-                             active_skill_names: Iterable[str]) -> RequestContract:
+                             active_skills: Iterable) -> RequestContract:
+    """输出结构契约从 Skill 路由的 output_contract(gate_terms/sections)读取,
+    不再按 Skill 名硬编码;传入字符串名时无契约(兼容旧调用方)。"""
     constraints: list[ArgumentConstraint] = []
     for match in _MAX_ROWS.finditer(user_input):
         maximum = int(match.group(1))
@@ -130,20 +126,17 @@ def compile_request_contract(user_input: str,
         if key not in strictest or item.value < strictest[key].value:
             strictest[key] = item
 
-    skills = set(active_skill_names)
     sections: list[OutputSection] = []
-    if "executive-report" in skills and any(term in user_input for term in _REPORT_TERMS):
-        names = ["执行摘要", "数据事实", "行动建议", "数据局限"]
-        if any(term in user_input for term in ("异常", "激增", "变化", "趋势")):
-            names.insert(2, "异常问题")
-        if any(term in user_input for term in ("样本", "案例", "代表性")):
-            names.insert(-2, "代表性样本")
-        sections = [_SECTION_CATALOG[name] for name in dict.fromkeys(names)]
-    elif ("monthly-guard-report" in skills
-          and any(term in user_input for term in _BILL_REPORT_TERMS)):
-        sections = [_ALL_SECTIONS_CATALOG[name] for name in _BILL_REPORT_SECTIONS]
+    for skill in active_skills:
+        contract = getattr(skill, "output_contract", None)
+        if not contract:
+            continue
+        if any(term in user_input for term in contract["gate_terms"]):
+            for name in contract["sections"]:
+                if name in _ALL_SECTIONS_CATALOG:
+                    sections.append(_ALL_SECTIONS_CATALOG[name])
 
-    return RequestContract(tuple(strictest.values()), tuple(sections))
+    return RequestContract(tuple(strictest.values()), tuple(dict.fromkeys(sections)))
 
 
 def output_sections_missing(answer: str, required_names: Iterable[str]) -> list[str]:

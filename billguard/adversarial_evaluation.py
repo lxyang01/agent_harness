@@ -477,7 +477,8 @@ class AdversarialEvaluator:
 
     @staticmethod
     def _write_skill(root: Path, name: str, triggers: list[str],
-                     allowed_tools: list[str], required_tools: list[str]) -> SkillRuntime:
+                     allowed_tools: list[str], required_tools: list[str],
+                     output_contract: dict | None = None) -> SkillRuntime:
         skill_dir = root / name
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(
@@ -491,6 +492,7 @@ class AdversarialEvaluator:
                 "allowed_tools": allowed_tools,
                 "completion_rules": [{"triggers": triggers, "required_tools": required_tools}]
                 if required_tools else [],
+                **({"output_contract": output_contract} if output_contract else {}),
             }],
         }, ensure_ascii=False), encoding="utf-8")
         return SkillRuntime(root)
@@ -498,6 +500,10 @@ class AdversarialEvaluator:
     def _incomplete_report(self, root: Path) -> ProbeResult:
         skills = self._write_skill(
             root / "skills", "executive-report", ["报告"], ["safe.read"], [],
+            output_contract={
+                "sections": ["执行摘要", "数据事实", "行动建议", "数据局限"],
+                "gate_terms": ["报告"],
+            },
         )
         complete = (
             "### 执行摘要\n摘要\n### 数据事实\n暂无数据\n"

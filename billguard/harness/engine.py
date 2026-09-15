@@ -128,9 +128,7 @@ class HarnessEngine:
             self._emit("skill_error", trace_id, session_id, error=str(exc))
             return self._finish(session, answer, 0, trace_id, session_id, [], status="failed")
 
-        request_contract = compile_request_contract(
-            user_input, (skill.name for skill in active_skills),
-        )
+        request_contract = compile_request_contract(user_input, active_skills)
         working = self.context_builder.build(
             self.spec, session.summary, session.messages, active_skills, request_contract,
         )
@@ -176,8 +174,7 @@ class HarnessEngine:
             raise PolicyError(f"approved tool is no longer allowed: {approval.tool_name}")
 
         request_contract = compile_request_contract(
-            str(checkpoint["user_input"]), (skill.name for skill in active_skills),
-        )
+            str(checkpoint["user_input"]), active_skills)
         working = self.context_builder.build(
             self.spec, session.summary, session.messages, active_skills, request_contract,
         )

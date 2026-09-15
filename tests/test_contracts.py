@@ -36,9 +36,16 @@ class ContractCompilerTests(unittest.TestCase):
         ))
 
     def test_report_contract_accepts_json_and_rejects_missing_sections(self):
+        # 契约从路由 output_contract 读取;构造带契约的激活对象驱动
+        from types import SimpleNamespace
+        activation = SimpleNamespace(output_contract={
+            "gate_terms": ["周报", "报告"],
+            "sections": ["执行摘要", "数据事实", "异常问题", "代表性样本",
+                          "行动建议", "数据局限"],
+        })
         contract = compile_request_contract(
             "生成最近7天客户反馈周报，包含异常问题和代表性样本。",
-            ["executive-report", "anomaly-investigation"],
+            [activation],
         )
         self.assertEqual(
             ["行动建议", "数据局限"],
@@ -122,7 +129,10 @@ class ContractCompilerTests(unittest.TestCase):
             (skill_root / "routes.json").write_text(json.dumps({
                 "default_skill": "executive-report",
                 "routes": [{"skill": "executive-report", "triggers": ["报告"],
-                            "allowed_tools": ["safe.read"]}],
+                            "allowed_tools": ["safe.read"],
+                            "output_contract": {
+                                "sections": ["执行摘要", "数据事实", "行动建议", "数据局限"],
+                                "gate_terms": ["报告"]}}],
             }, ensure_ascii=False), encoding="utf-8")
             registry = ToolRegistry()
             registry.register(Tool(
