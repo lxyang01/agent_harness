@@ -49,7 +49,7 @@ class RoutingEvaluationTests(unittest.TestCase):
             self.assertIn("Completion contract", Path(paths["markdown"]).read_text(encoding="utf-8"))
             listed = EvaluationReportStore(temp).list()
             self.assertEqual(1, len(listed))
-            self.assertEqual(62, listed[0]["dataset_size"])
+            self.assertEqual(64, listed[0]["dataset_size"])
             self.assertEqual(3, len(listed[0]["variants"]))
 
 
