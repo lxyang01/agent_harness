@@ -1,9 +1,12 @@
 # tests/test_coordination.py — Redis 协调层测试;连接 compose Redis(127.0.0.1:6380/0)。
 # 断言体移植自任务简报;按控制器 F4 裁定:acquire() 返回 bool,
 # 失败断言用 assertFalse(简报原文为 assertIsNone),成功仍用 assertTrue。
+# 修复轮 1:锁测试类 tearDown 自清理锁键,重跑不再受 5s TTL 残留影响。
 from __future__ import annotations
 
-import threading, unittest
+import hashlib
+import unittest
+
 import redis
 from billguard.coordination import (
     RedisSessionLock, RedisLLMLimiter, RedisAuthSessions, LockedError,
@@ -13,6 +16,13 @@ CLIENT = redis.Redis.from_url("redis://127.0.0.1:6380/0", decode_responses=True)
 
 
 class SessionLockTests(unittest.TestCase):
+    # 自清理:删除本类用到的锁键,测试结束零残留(简报测试会故意留 5s TTL 的持锁)
+    KEYS = tuple(f"lock:session:{hashlib.sha256(s.encode()).hexdigest()}"
+                 for s in ("s1", "s2", "s3"))
+
+    def tearDown(self) -> None:
+        CLIENT.delete(*self.KEYS)
+
     def test_exclusive_and_cross_instance(self):
         # 锁 A 持有时,新客户端(模拟另一实例)acquire 返回 False
         lock = RedisSessionLock(CLIENT, "s1", ttl_ms=5000)
@@ -63,6 +73,11 @@ class AuthSessionTests(unittest.TestCase):
 
 
 class AcquireSessionLockTests(unittest.TestCase):
+    KEYS = (f"lock:session:{hashlib.sha256('helper1'.encode()).hexdigest()}",)
+
+    def tearDown(self) -> None:
+        CLIENT.delete(*self.KEYS)
+
     def test_helper_acquire_release_cycle(self):
         # F4 补充:helper 成功返回锁对象,占用期返回 None,释放后可再获取
         lock = acquire_session_lock(CLIENT, "helper1", ttl_ms=5000)
