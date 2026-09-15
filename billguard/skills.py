@@ -16,6 +16,39 @@ class SkillError(ValueError):
     """Raised when skill discovery, routing, or activation is invalid."""
 
 
+def _valid_trigger(value: object) -> bool:
+    """触发词合法形态:非空字符串,或至少两个非空词的数组(共现组)。"""
+    if isinstance(value, str):
+        return bool(value)
+    if isinstance(value, list):
+        return len(value) >= 2 and all(
+            isinstance(word, str) and word for word in value)
+    return False
+
+
+def _match_trigger(triggers: tuple[str | list[str], ...],
+                   lowered: str) -> tuple[int, str] | None:
+    """字符串触发词按连续子串;数组触发词按共现(全词出现,顺序无关)。
+
+    返回 (得分增量, 命中说明);未命中返回 None。"""
+    best: tuple[int, str] | None = None
+    for trigger in triggers:
+        if isinstance(trigger, str):
+            if trigger.casefold() in lowered:
+                candidate = (len(trigger), trigger)
+            else:
+                continue
+        else:
+            words = [str(word).casefold() for word in trigger]
+            if words and all(word in lowered for word in words):
+                candidate = (sum(len(word) for word in words), "+".join(trigger))
+            else:
+                continue
+        if best is None or candidate[0] > best[0]:
+            best = candidate
+    return best
+
+
 @dataclass(frozen=True)
 class SkillMetadata:
     name: str
@@ -37,6 +70,7 @@ class SkillRoute:
     allowed_tools: tuple[str, ...]
     completion_rules: tuple[SkillCompletionRule, ...] = ()
     priority: int = 0
+    output_contract: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +85,7 @@ class SkillActivation:
     required_tools: tuple[str, ...] = ()
     required_tool_groups: tuple[tuple[str, ...], ...] = ()
     required_tool_plan: tuple[tuple[str, ...], ...] = ()
+    output_contract: dict | None = None
 
 
 class SkillRuntime:
@@ -102,14 +137,13 @@ class SkillRuntime:
             candidates[name] = (10_000, f"explicit:${name}")
         lowered = text.casefold()
         for route in self._routes.values():
-            matched = [trigger for trigger in route.triggers if trigger.casefold() in lowered]
-            if not matched:
+            match = _match_trigger(route.triggers, lowered)
+            if match is None:
                 continue
-            longest = max(matched, key=len)
-            score = 100 + route.priority + len(longest)
+            score = 100 + route.priority + match[0]
             previous = candidates.get(route.skill_name)
             if previous is None or score > previous[0]:
-                candidates[route.skill_name] = (score, f"trigger:{longest}")
+                candidates[route.skill_name] = (score, f"trigger:{match[1]}")
 
         if not candidates and self._default_skill:
             candidates[self._default_skill] = (1, "default")
@@ -153,7 +187,9 @@ class SkillRuntime:
                 raise SkillError(f"route references an uninstalled skill: {name}")
             if name in routes:
                 raise SkillError(f"duplicate route for skill: {name}")
-            if not isinstance(triggers, list) or not all(isinstance(value, str) and value for value in triggers):
+            if not isinstance(triggers, list) or not all(
+                _valid_trigger(value) for value in triggers
+            ):
                 raise SkillError(f"invalid triggers for skill: {name}")
             if not isinstance(allowed_tools, list) or not all(
                 isinstance(value, str) and value for value in allowed_tools
@@ -171,7 +207,7 @@ class SkillRuntime:
                 required_tools = rule.get("required_tools", [])
                 required_tool_groups = rule.get("required_tool_groups", [])
                 if not isinstance(rule_triggers, list) or not all(
-                    isinstance(value, str) and value for value in rule_triggers
+                    _valid_trigger(value) for value in rule_triggers
                 ):
                     raise SkillError(f"invalid completion rule triggers for skill: {name}")
                 if not isinstance(required_tools, list) or not all(
@@ -202,9 +238,21 @@ class SkillRuntime:
                     tuple(rule_triggers), tuple(dict.fromkeys(required_tools)),
                     tuple(tuple(dict.fromkeys(group)) for group in required_tool_groups),
                 ))
+            output_contract = item.get("output_contract")
+            if output_contract is not None:
+                if not isinstance(output_contract, dict):
+                    raise SkillError(f"invalid output_contract for skill: {name}")
+                sections = output_contract.get("sections", [])
+                gate_terms = output_contract.get("gate_terms", [])
+                if (not isinstance(sections, list) or not sections
+                        or not all(isinstance(s, str) and s for s in sections)
+                        or not isinstance(gate_terms, list) or not gate_terms
+                        or not all(isinstance(g, str) and g for g in gate_terms)):
+                    raise SkillError(
+                        f"output_contract requires non-empty sections and gate_terms: {name}")
             routes[name] = SkillRoute(
                 name, tuple(triggers), tuple(dict.fromkeys(allowed_tools)),
-                tuple(parsed_rules), priority,
+                tuple(parsed_rules), priority, output_contract,
             )
         missing = set(self._metadata) - set(routes)
         if missing:
@@ -228,11 +276,13 @@ class SkillRuntime:
             raise SkillError(f"skill body is empty: {name}")
         if len(instructions.splitlines()) > 500:
             raise SkillError(f"skill body exceeds 500 lines: {name}")
+        if len(instructions) > 8000:  # 不可信内容上限,防膨胀/注入载体
+            raise SkillError(f"skill body exceeds 8000 chars: {name}")
         version = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
         route = self._routes[name]
         matched_rules = [
             rule for rule in route.completion_rules
-            if any(trigger.casefold() in lowered_input for trigger in rule.triggers)
+            if _match_trigger(rule.triggers, lowered_input) is not None
         ]
         required_tools = tuple(dict.fromkeys(
             tool
@@ -263,6 +313,7 @@ class SkillRuntime:
             required_tools=required_tools,
             required_tool_groups=required_tool_groups,
             required_tool_plan=required_tool_plan,
+            output_contract=route.output_contract,
         )
 
     @classmethod

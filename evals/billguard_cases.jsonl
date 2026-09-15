@@ -1,50 +1,62 @@
-{"id":"triage-01","category":"triage","input":"我这个月花了多少钱","expected_skills":["bill-triage"]}
-{"id":"triage-02","category":"triage","input":"给我一份支出概览","expected_skills":["bill-triage"]}
-{"id":"triage-03","category":"triage","input":"看看我的消费分类","expected_skills":["bill-triage"]}
-{"id":"triage-04","category":"triage","input":"最近的钱花哪儿了","expected_skills":["bill-triage"]}
-{"id":"triage-05","category":"triage","input":"帮我看看最近的账单","expected_skills":["bill-triage"]}
-{"id":"triage-06","category":"triage","input":"本月支出情况怎么样","expected_skills":["bill-triage"]}
-{"id":"triage-07","category":"triage","input":"消费明细帮我理一理","expected_skills":["bill-triage"]}
-{"id":"triage-08","category":"triage","input":"各类支出占比是多少","expected_skills":["bill-triage"]}
-{"id":"triage-09","category":"triage","input":"最近消费帮我梳理一下","expected_skills":["bill-triage"]}
-{"id":"triage-10","category":"triage","input":"账单里有哪些高频商户","expected_skills":["bill-triage"]}
-{"id":"anomaly-01","category":"anomaly","input":"最近有什么异常扣费","expected_skills":["anomaly-investigation"]}
-{"id":"anomaly-02","category":"anomaly","input":"有没有订阅涨价","expected_skills":["anomaly-investigation"]}
-{"id":"anomaly-03","category":"anomaly","input":"查一下重复扣费","expected_skills":["anomaly-investigation"]}
-{"id":"anomaly-04","category":"anomaly","input":"疑似盗刷的交易有哪些","expected_skills":["anomaly-investigation"]}
-{"id":"anomaly-05","category":"anomaly","input":"扣费环比有什么变化","expected_skills":["anomaly-investigation"]}
-{"id":"anomaly-06","category":"anomaly","input":"对比最近两个月的花费","expected_skills":["anomaly-investigation"]}
-{"id":"anomaly-07","category":"anomaly","input":"哪类花销激增了","expected_skills":["anomaly-investigation"]}
-{"id":"anomaly-08","category":"anomaly","input":"可疑交易帮我检查一下","expected_skills":["anomaly-investigation"]}
-{"id":"anomaly-09","category":"anomaly","input":"本月扣费比上月多出多少，算一下变化","expected_skills":["anomaly-investigation"]}
-{"id":"anomaly-10","category":"anomaly","input":"给我一份异常扣费清单","expected_skills":["anomaly-investigation"]}
-{"id":"root-01","category":"root_cause","input":"腾讯视频为什么扣费变多了","expected_skills":["root-cause-analysis"]}
-{"id":"root-02","category":"root_cause","input":"这笔交易金额为什么这么大","expected_skills":["root-cause-analysis"]}
-{"id":"root-03","category":"root_cause","input":"百度网盘为何扣了两次","expected_skills":["root-cause-analysis"]}
-{"id":"root-04","category":"root_cause","input":"订阅费上调的原因是什么","expected_skills":["root-cause-analysis"]}
-{"id":"root-05","category":"root_cause","input":"为什么这个月扣费变多","expected_skills":["root-cause-analysis"]}
-{"id":"root-06","category":"root_cause","input":"这笔扣费是怎么回事","expected_skills":["root-cause-analysis"]}
-{"id":"root-07","category":"root_cause","input":"为何有笔不认识的扣费","expected_skills":["root-cause-analysis"]}
-{"id":"root-08","category":"root_cause","input":"分析娱乐花销增加的原因","expected_skills":["root-cause-analysis"]}
-{"id":"root-09","category":"root_cause","input":"为什么娱乐花销变多了","expected_skills":["root-cause-analysis"]}
-{"id":"root-10","category":"root_cause","input":"这笔重复扣款是怎么回事","expected_skills":["root-cause-analysis"]}
-{"id":"report-01","category":"report","input":"生成本月守卫报告","expected_skills":["monthly-guard-report"]}
-{"id":"report-02","category":"report","input":"给我一份月度财务报告","expected_skills":["monthly-guard-report"]}
-{"id":"report-03","category":"report","input":"本月花销总结","expected_skills":["monthly-guard-report"]}
-{"id":"report-04","category":"report","input":"给我一份财务汇报","expected_skills":["monthly-guard-report"]}
-{"id":"report-05","category":"report","input":"生成本月守卫月报","expected_skills":["monthly-guard-report"]}
-{"id":"report-06","category":"report","input":"总结本月情况并给行动建议","expected_skills":["monthly-guard-report"]}
-{"id":"report-07","category":"report","input":"月报要包含取消订阅建议","expected_skills":["monthly-guard-report"]}
-{"id":"report-08","category":"report","input":"生成订阅体检报告","expected_skills":["monthly-guard-report"]}
-{"id":"report-09","category":"report","input":"本月财务小结","expected_skills":["monthly-guard-report"]}
-{"id":"report-10","category":"report","input":"报告里要有行动计划","expected_skills":["monthly-guard-report"]}
-{"id":"action-01","category":"action","input":"帮我取消订阅腾讯视频","expected_skills":["monthly-guard-report"]}
-{"id":"action-02","category":"action","input":"申请百度网盘退款","expected_skills":["monthly-guard-report"]}
-{"id":"action-03","category":"action","input":"取消订阅这个服务","expected_skills":["monthly-guard-report"]}
-{"id":"action-04","category":"action","input":"为这笔多收的费用发起退款工单","expected_skills":["monthly-guard-report"]}
-{"id":"action-05","category":"action","input":"为这笔扣费申请退款","expected_skills":["monthly-guard-report"]}
-{"id":"action-06","category":"action","input":"把费率变高的服务取消订阅","expected_skills":["monthly-guard-report"]}
-{"id":"action-07","category":"action","input":"创建一个取消订阅工单","expected_skills":["monthly-guard-report"]}
-{"id":"action-08","category":"action","input":"退款流程怎么走，帮我发起","expected_skills":["monthly-guard-report"]}
-{"id":"action-09","category":"action","input":"取消订阅音乐会员","expected_skills":["monthly-guard-report"]}
-{"id":"action-10","category":"action","input":"提交一份退款工单","expected_skills":["monthly-guard-report"]}
+{"id": "triage-01", "category": "triage", "input": "我这个月花了多少钱", "expected_skills": ["bill-triage"]}
+{"id": "triage-02", "category": "triage", "input": "给我一份支出概览", "expected_skills": ["bill-triage"]}
+{"id": "triage-03", "category": "triage", "input": "看看我的消费分类", "expected_skills": ["bill-triage"]}
+{"id": "triage-04", "category": "triage", "input": "最近的钱花哪儿了", "expected_skills": ["bill-triage"]}
+{"id": "triage-05", "category": "triage", "input": "帮我看看最近的账单", "expected_skills": ["bill-triage"]}
+{"id": "triage-06", "category": "triage", "input": "本月支出情况怎么样", "expected_skills": ["bill-triage"]}
+{"id": "triage-07", "category": "triage", "input": "消费明细帮我理一理", "expected_skills": ["bill-triage"]}
+{"id": "triage-08", "category": "triage", "input": "各类支出占比是多少", "expected_skills": ["bill-triage"]}
+{"id": "triage-09", "category": "triage", "input": "最近消费帮我梳理一下", "expected_skills": ["bill-triage"]}
+{"id": "triage-10", "category": "triage", "input": "账单里有哪些高频商户", "expected_skills": ["bill-triage"]}
+{"id": "anomaly-01", "category": "anomaly", "input": "最近有什么异常扣费", "expected_skills": ["anomaly-investigation"]}
+{"id": "anomaly-02", "category": "anomaly", "input": "有没有订阅涨价", "expected_skills": ["anomaly-investigation"]}
+{"id": "anomaly-03", "category": "anomaly", "input": "查一下重复扣费", "expected_skills": ["anomaly-investigation"]}
+{"id": "anomaly-04", "category": "anomaly", "input": "疑似盗刷的交易有哪些", "expected_skills": ["anomaly-investigation"]}
+{"id": "anomaly-05", "category": "anomaly", "input": "扣费环比有什么变化", "expected_skills": ["anomaly-investigation"]}
+{"id": "anomaly-06", "category": "anomaly", "input": "对比最近两个月的花费", "expected_skills": ["anomaly-investigation"]}
+{"id": "anomaly-07", "category": "anomaly", "input": "哪类花销激增了", "expected_skills": ["anomaly-investigation"]}
+{"id": "anomaly-08", "category": "anomaly", "input": "可疑交易帮我检查一下", "expected_skills": ["anomaly-investigation"]}
+{"id": "anomaly-09", "category": "anomaly", "input": "本月扣费比上月多出多少，算一下变化", "expected_skills": ["anomaly-investigation"]}
+{"id": "anomaly-10", "category": "anomaly", "input": "给我一份异常扣费清单", "expected_skills": ["anomaly-investigation"]}
+{"id": "root-01", "category": "root_cause", "input": "腾讯视频为什么扣费变多了", "expected_skills": ["root-cause-analysis"]}
+{"id": "root-02", "category": "root_cause", "input": "这笔交易金额为什么这么大", "expected_skills": ["root-cause-analysis"]}
+{"id": "root-03", "category": "root_cause", "input": "百度网盘为何扣了两次", "expected_skills": ["root-cause-analysis"]}
+{"id": "root-04", "category": "root_cause", "input": "订阅费上调的原因是什么", "expected_skills": ["root-cause-analysis"]}
+{"id": "root-05", "category": "root_cause", "input": "为什么这个月扣费变多", "expected_skills": ["root-cause-analysis"]}
+{"id": "root-06", "category": "root_cause", "input": "这笔扣费是怎么回事", "expected_skills": ["root-cause-analysis"]}
+{"id": "root-07", "category": "root_cause", "input": "为何有笔不认识的扣费", "expected_skills": ["root-cause-analysis"]}
+{"id": "root-08", "category": "root_cause", "input": "分析娱乐花销增加的原因", "expected_skills": ["root-cause-analysis"]}
+{"id": "root-09", "category": "root_cause", "input": "为什么娱乐花销变多了", "expected_skills": ["root-cause-analysis"]}
+{"id": "root-10", "category": "root_cause", "input": "这笔重复扣款是怎么回事", "expected_skills": ["root-cause-analysis"]}
+{"id": "report-01", "category": "report", "input": "生成本月守卫报告", "expected_skills": ["monthly-guard-report"]}
+{"id": "report-02", "category": "report", "input": "给我一份月度财务报告", "expected_skills": ["monthly-guard-report"]}
+{"id": "report-03", "category": "report", "input": "本月花销总结", "expected_skills": ["monthly-guard-report"]}
+{"id": "report-04", "category": "report", "input": "给我一份财务汇报", "expected_skills": ["monthly-guard-report"]}
+{"id": "report-05", "category": "report", "input": "生成本月守卫月报", "expected_skills": ["monthly-guard-report"]}
+{"id": "report-06", "category": "report", "input": "总结本月情况并给行动建议", "expected_skills": ["monthly-guard-report"]}
+{"id": "report-07", "category": "report", "input": "月报要包含取消订阅建议", "expected_skills": ["monthly-guard-report"]}
+{"id": "report-08", "category": "report", "input": "生成订阅体检报告", "expected_skills": ["monthly-guard-report"]}
+{"id": "report-09", "category": "report", "input": "本月财务小结", "expected_skills": ["monthly-guard-report"]}
+{"id": "report-10", "category": "report", "input": "报告里要有行动计划", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-01", "category": "action", "input": "帮我取消订阅腾讯视频", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-02", "category": "action", "input": "申请百度网盘退款", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-03", "category": "action", "input": "取消订阅这个服务", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-04", "category": "action", "input": "为这笔多收的费用发起退款工单", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-05", "category": "action", "input": "为这笔扣费申请退款", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-06", "category": "action", "input": "把费率变高的服务取消订阅", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-07", "category": "action", "input": "创建一个取消订阅工单", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-08", "category": "action", "input": "退款流程怎么走，帮我发起", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-09", "category": "action", "input": "取消订阅音乐会员", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-10", "category": "action", "input": "提交一份退款工单", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-11", "category": "action", "input": "帮我取消腾讯视频订阅", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-12", "category": "action", "input": "取消掉这个腾讯视频的订阅", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-13", "category": "action", "input": "把腾讯视频的订阅取消掉", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-14", "category": "action", "input": "取消腾讯会员的自动续费", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-15", "category": "action", "input": "把腾讯视频的自动续费关掉", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-16", "category": "action", "input": "腾讯视频到期后不续费了", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-17", "category": "action", "input": "停止自动扣款", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-18", "category": "action", "input": "把这个服务取消掉", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-19", "category": "action", "input": "会员退掉吧", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-20", "category": "action", "input": "把钱退给我", "expected_skills": ["monthly-guard-report"]}
+{"id": "triage-11", "category": "triage", "input": "最近开销好大", "expected_skills": ["bill-triage"]}
+{"id": "root-11", "category": "root", "input": "这笔交易咋回事", "expected_skills": ["root-cause-analysis"]}

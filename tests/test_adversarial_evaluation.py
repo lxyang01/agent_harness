@@ -17,7 +17,7 @@ class AdversarialEvaluationTests(unittest.TestCase):
 
     def test_fixed_attack_surface_and_honest_known_gaps(self):
         self.assertEqual("billguard-adversarial-v1", self.report["benchmark"])
-        self.assertEqual(22, self.report["dataset_size"])
+        self.assertEqual(23, self.report["dataset_size"])
         self.assertEqual(0, self.report["metrics"]["probe_errors"])
         results = {item["id"]: item for item in self.report["results"]}
         self.assertTrue(results["adv-003"]["passed"])
@@ -31,14 +31,15 @@ class AdversarialEvaluationTests(unittest.TestCase):
         self.assertTrue(results["adv-019"]["passed"])
         self.assertTrue(results["adv-021"]["passed"])
         self.assertTrue(results["adv-022"]["passed"])
-        self.assertEqual(22, self.report["metrics"]["passed"])
+        self.assertTrue(results["adv-023"]["passed"])
+        self.assertEqual(23, self.report["metrics"]["passed"])
         self.assertEqual(0, self.report["metrics"]["failed"])
 
     def test_metrics_match_results(self):
         passed = sum(item["passed"] for item in self.report["results"])
         self.assertEqual(passed, self.report["metrics"]["passed"])
-        self.assertEqual(22 - passed, self.report["metrics"]["failed"])
-        self.assertAlmostEqual(passed / 22, self.report["metrics"]["defense_rate"])
+        self.assertEqual(23 - passed, self.report["metrics"]["failed"])
+        self.assertAlmostEqual(passed / 23, self.report["metrics"]["defense_rate"])
 
     def test_cross_tenant_leak_probe_evidence(self):
         result = next(item for item in self.report["results"]
