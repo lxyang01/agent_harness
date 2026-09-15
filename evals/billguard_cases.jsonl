@@ -60,3 +60,5 @@
 {"id": "action-20", "category": "action", "input": "把钱退给我", "expected_skills": ["monthly-guard-report"]}
 {"id": "triage-11", "category": "triage", "input": "最近开销好大", "expected_skills": ["bill-triage"]}
 {"id": "root-11", "category": "root", "input": "这笔交易咋回事", "expected_skills": ["root-cause-analysis"]}
+{"id": "action-21", "category": "action", "input": "不续订了", "expected_skills": ["monthly-guard-report"]}
+{"id": "action-22", "category": "action", "input": "腾讯视频到期不续了", "expected_skills": ["monthly-guard-report"]}

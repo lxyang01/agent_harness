@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 class RoutingEvaluationTests(unittest.TestCase):
     def test_fixed_fifty_case_ablation_is_reproducible_and_scoped(self):
         cases = load_eval_cases(PROJECT_ROOT / "evals" / "billguard_cases.jsonl")
-        self.assertEqual(62, len(cases))
+        self.assertEqual(64, len(cases))
         evaluator = RoutingEvaluator(SkillRuntime(PROJECT_ROOT / "skills"))
         report = evaluator.compare(cases)
         variants = {item["variant"]: item["metrics"] for item in report["variants"]}
@@ -35,7 +35,7 @@ class RoutingEvaluationTests(unittest.TestCase):
             self.assertEqual(variants[name]["skill_routing_accuracy"], routing)
             self.assertGreaterEqual(variants[name]["overall_accuracy"], 0.0)
             self.assertLessEqual(variants[name]["overall_accuracy"], 1.0)
-        self.assertAlmostEqual(11 / 62, variants["baseline"]["overall_accuracy"], places=3)
+        self.assertAlmostEqual(11 / 64, variants["baseline"]["overall_accuracy"], places=3)
         self.assertEqual(1.0, variants["skills"]["skill_routing_accuracy"])
         self.assertEqual(1.0, variants["full"]["overall_accuracy"])
         self.assertIn("does not measure LLM groundedness", report["scope_note"])

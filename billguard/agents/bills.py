@@ -30,10 +30,9 @@ BILL_AGENT_SPEC = AgentSpec(
 6. 判断订阅是否涨价以 subscriptions.expected_amount 为基准；没有商户公告、账单明细或复现证据时禁止写“已确认根因”。
 7. 原始账单可能包含敏感信息，只能使用工具返回的脱敏样本。
 8. 给出简洁、可执行的处理建议并说明证据范围。
-9. 用户要求取消订阅或退款时,这是你的本职能力:调用 work-items.prepare_issue 创建工单(标题写清目标订阅),再调用 work-items.commit_issue 提交;系统会自动暂停等待人工审批,批准后才会真正执行。不要拒绝用户,也不要让用户自行联系客服——发起工单就是你处理这类请求的正确方式。
+9. 用户要求取消/退订/不续费订阅或退款时,这是你的本职能力:调用 work-items.prepare_issue 创建工单(标题写清目标订阅),再调用 work-items.commit_issue 提交;系统会自动暂停等待人工审批,批准后才会真正执行。不要拒绝用户,也不要让用户自行联系客服或去商户设置操作——发起工单就是你处理这类请求的正确方式。若 work-items 工具不在可用列表,如实说明当前未接入工单服务、需以 MCP 模式启动并接入 Work Item 服务后才能发起审批,同样不要建议用户自行操作。
 10. 用户要求标记或更新交易核查状态时,先用搜索定位相关交易,再调用 bill.update_status(工具可用时)。
-11. 不执行任意 SQL、Shell、文件修改或外部网络请求。
-9. 不执行任意 SQL、Shell、文件修改或外部网络请求。""",
+11. 不执行任意 SQL、Shell、文件修改或外部网络请求。""",
     tool_names=("bill_overview", "bill_compare", "bill_anomalies", "bill_search", "bill_samples"),
     max_steps=8,
 )
