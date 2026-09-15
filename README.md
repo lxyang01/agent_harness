@@ -212,7 +212,7 @@ python -m pip install -e .
 python -m billguard.users add admin --role admin
 ```
 
-### 参考:模型服务选择(OpenAI 兼容三选一)
+### 参考:模型服务选择(OpenAI 兼容)
 
 ```powershell
 # OpenRouter(需代理;--base-url 默认即此,故日常启动未显式传)
@@ -223,8 +223,6 @@ python -m billguard.web --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0
 $env:OPENROUTER_API_KEY="你的 DeepSeek Key"
 python -m billguard.web --base-url "https://api.deepseek.com/v1" --model "deepseek-chat"
 
-# 本地 Ollama(免费,无需 Key 与代理)
-python -m billguard.web --base-url "http://127.0.0.1:11434/v1" --model "qwen2.5:7b"
 ```
 
 不要将 API Key 写入代码或提交到 Git。
@@ -236,7 +234,6 @@ python -m billguard.web --base-url "http://127.0.0.1:11434/v1" --model "qwen2.5:
 | --base-url | https://api.openai.com/v1 | 任意 OpenAI 兼容 API 地址 |
 | --model | gpt-4.1-mini | 模型名 |
 | --llm-proxy | 空 | 模型请求代理 |
-| --work-item-mcp-url | 空 | 高级选项:接入远程工单服务;缺省自动拉起本地 stdio 子进程 |
 | --max-concurrent-llm | 4 | 模型并发上限,超限 429 |
 | --max-threads / --queue-capacity | 16 / 32 | HTTP 线程池与排队容量,满载 503 |
 | --run-timeout | 120s | 单次 Agent 运行总预算,超限安全停止 |
