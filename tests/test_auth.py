@@ -161,9 +161,10 @@ class AuthSessionTests(StoreTestCase):
         sessions = self.sessions()
         token = sessions.create("alice")
         # 原断言以 ttl_days=-1 构造已过期(SQLite 可写过去时间戳);Redis 的
-        # ex 不接受负值,等价可观察量:把键 TTL 压到 60ms 后等待其自然过期
-        self.redis.pexpire(token_key(token), 60)
-        time.sleep(0.1)
+        # ex 不接受负值,等价可观察量:把键 TTL 压到 500ms 后等待其自然过期
+        # (pexpire 500ms + sleep 700ms,留 200ms 余量抗调度抖动)
+        self.redis.pexpire(token_key(token), 500)
+        time.sleep(0.7)
         self.assertIsNone(sessions.resolve(token))
 
     def test_resolve_requires_cookie_and_checks_user(self):
@@ -195,10 +196,9 @@ class AuthSessionTests(StoreTestCase):
 
 class PasswordResetTests(unittest.TestCase):
     def test_password_reset_invalidates_existing_sessions(self):
-        # 单进程契约(UserStore+AuthSessionStore 文件版):改密联动清理服务端会话。
-        # 分布式后端(PGUserStore+RedisAuthSessions)按 T1/T2 决策不做联动
-        # (storage_pg 注释:PG schema 无 auth_sessions 表),本语义仅由
-        # 单进程路径保障,故保留文件版构造(见任务报告 concerns)。
+        # 单进程契约(UserStore+AuthSessionStore 文件版):改密联动清理服务端会话
+        # (auth.py 内联 DELETE FROM auth_sessions)。分布式等价语义见
+        # DistributedSessionInvalidationTests(PGUserStore×RedisAuthSessions)。
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "auth"
             users = UserStore(root)
@@ -209,6 +209,59 @@ class PasswordResetTests(unittest.TestCase):
             users.reset_password("alice", "new-pass-12345")
             with self.assertRaises(AuthError):
                 auth.resolve_user(FakeHeaders(f"session={token}"))
+
+
+class DistributedSessionInvalidationTests(StoreTestCase):
+    """分布式联动(修复轮 1):PGUserStore 注入 RedisAuthSessions 后,
+    改密/删户经反向索引(auth:user:{username})立即失效该用户全部
+    Redis 登录令牌——等价单进程 auth.py 的 auth_sessions 联动清理。
+    set_disabled 不联动:resolve_user 每次请求都拒绝禁用用户(天然 kill-switch)。
+    """
+
+    def _login_twice(self, username: str = "alice",
+                     password: str = "alice-pass-123") -> tuple[PGUserStore, Authenticator, list[str]]:
+        sessions = RedisAuthSessions(self.redis)
+        users = PGUserStore(self.pool, sessions=sessions)
+        users.create(username, password, "user")
+        auth = Authenticator(users, sessions)
+        tokens = [auth.login(username, password)[1] for _ in range(2)]
+        return users, auth, tokens
+
+    def test_password_reset_invalidates_all_existing_sessions(self):
+        users, auth, tokens = self._login_twice()
+        for token in tokens:  # 两个并发登录均有效
+            self.assertEqual("alice",
+                             auth.resolve_user(FakeHeaders(f"session={token}")).username)
+        users.reset_password("alice", "new-pass-12345")
+        for token in tokens:  # 改密后全部立即失效(不止当前请求持有的那个)
+            with self.assertRaises(AuthError):
+                auth.resolve_user(FakeHeaders(f"session={token}"))
+        # 反查索引与令牌键一并清除,零残留
+        self.assertEqual([], list(self.redis.scan_iter(match="auth:user:alice")))
+        self.assertEqual([], [key for token in tokens
+                              for key in self.redis.scan_iter(match=token_key(token))])
+
+    def test_delete_user_invalidates_existing_sessions(self):
+        users, auth, tokens = self._login_twice()
+        users.create("boss", "boss-pass-1234", "admin")  # 保证库里有其他账号
+        self.assertEqual("alice",
+                         auth.resolve_user(FakeHeaders(f"session={tokens[0]}")).username)
+        users.delete("alice")
+        for token in tokens:  # 删户后全部令牌立即失效
+            with self.assertRaises(AuthError):
+                auth.resolve_user(FakeHeaders(f"session={token}"))
+
+    def test_renewal_refreshes_reverse_index_ttl(self):
+        # 滑动续期同步续反向索引:令牌仍活跃时,索引不得先于令牌过期
+        sessions = RedisAuthSessions(self.redis)
+        token = sessions.create("erin")
+        key = token_key(token)
+        self.redis.expire(key, 5 * 86400)  # 压到剩余 5 天(< 6 天阈值)
+        self.redis.expire("auth:user:erin", 5 * 86400)
+        self.assertEqual("erin", sessions.resolve(token))
+        self.assertGreaterEqual(self.redis.ttl(key), 6 * 86400)  # 令牌滑回 ≥6 天
+        self.assertGreaterEqual(self.redis.ttl("auth:user:erin"),
+                                6 * 86400)  # 索引同步续期
 
 
 if __name__ == "__main__":

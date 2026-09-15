@@ -41,8 +41,9 @@ TABLES = ("tx_audits", "transactions", "categories", "subscriptions", "imports",
           "reports", "approvals", "wi_approvals", "issues", "sessions",
           "evidence", "traces", "users")
 
-# 迁移测试会产生的 Redis 键前缀(套件串行运行,前缀清扫安全)
-REDIS_KEY_PATTERNS = ("lock:session:*", "auth:token:*", "llm:slots")
+# 迁移测试会产生的 Redis 键前缀(套件串行运行,前缀清扫安全);
+# auth:user:* 为 RedisAuthSessions 的按用户反向索引(改密/删户失效通道)
+REDIS_KEY_PATTERNS = ("lock:session:*", "auth:token:*", "auth:user:*", "llm:slots")
 
 
 def pg_pool() -> ConnectionPool:

@@ -78,14 +78,27 @@ class _PooledStore:
 class PGUserStore(_PooledStore):
     """PG 版 users 表;密码/校验逻辑复用 auth.py,SQL 仅换方言。"""
 
-    def __init__(self, pool: ConnectionPool) -> None:
+    def __init__(self, pool: ConnectionPool, sessions: Any = None) -> None:
         self.pool = pool
+        # 注入会话后端(如 RedisAuthSessions)后,reset_password/delete 联动
+        # 失效该用户全部服务端会话(等价单进程 auth.py 的 auth_sessions 清理);
+        # PG schema 无 auth_sessions 表,会话由注入方管理。
+        self._sessions = sessions
         with self._connect() as db:
             # 迁移 UPDATE 同单进程版;PG 布尔列用 TRUE 表达(语义等价 disabled=1)
             db.execute("UPDATE users SET role = 'user' WHERE role = 'approver'")
             db.execute("UPDATE users SET disabled = TRUE WHERE role = 'viewer'")
-        # 注:PG schema 无 auth_sessions 表(compose 侧会话另行管理),
-        # reset_password/delete 不再联动清理服务端会话。
+
+    def _invalidate_sessions(self, username: str) -> None:
+        """改密/删户后失效该用户全部登录会话(单进程在 auth.py 内联实现)。
+
+        按能力探测:后端提供 delete_by_user(如 RedisAuthSessions)时调用,
+        否则静默跳过。set_disabled 不在此列:resolve_user 每次请求都会
+        拒绝禁用用户,禁用本身就是 kill-switch,无需再清会话。
+        """
+        invalidate = getattr(self._sessions, "delete_by_user", None)
+        if invalidate is not None:
+            invalidate(username)
 
     def _row(self, db: psycopg.Connection, username: str) -> dict[str, Any] | None:
         return db.execute("SELECT * FROM users WHERE username = %s", (username,)).fetchone()
@@ -168,6 +181,7 @@ class PGUserStore(_PooledStore):
                 raise AuthError(f"用户不存在:{username}")
             db.execute("UPDATE users SET password_hash = %s, salt = %s WHERE username = %s",
                        (_hash_password(password, salt).hex(), salt.hex(), username))
+        self._invalidate_sessions(username)
 
     def delete(self, username: str) -> None:
         with self._connect() as db:
@@ -178,6 +192,7 @@ class PGUserStore(_PooledStore):
                     and self._enabled_admins(db, exclude=username) == 0:
                 raise AuthError("不能删除最后一个启用中的管理员")
             db.execute("DELETE FROM users WHERE username = %s", (username,))
+        self._invalidate_sessions(username)
 
     def set_disabled(self, username: str, disabled: bool) -> User:
         with self._connect() as db:

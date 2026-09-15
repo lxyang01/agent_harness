@@ -23,13 +23,23 @@ def _store(args: argparse.Namespace) -> tuple[UserStore, "object | None"]:
 
     设置 BILLGUARD_PG_DSN 时走 PGUserStore(进程级连接池,由 main 负责
     用后关闭);否则保持单进程 UserStore(<data-dir>/billguard/auth)不变。
+    PG 分支若同时设置 BILLGUARD_REDIS_URL,注入 RedisAuthSessions 使
+    reset-password 联动失效该用户全部登录会话(与 web 分布式装配对齐)。
     返回 (store, pool),pool 仅 PG 分支非 None。
     """
     dsn = os.environ.get("BILLGUARD_PG_DSN")
     if dsn:
+        import redis as redis_module
+
+        from .coordination import RedisAuthSessions
         from .storage_pg import PGUserStore, new_pg_pool
         pool = new_pg_pool(dsn)
-        return PGUserStore(pool), pool
+        sessions = None
+        redis_url = os.environ.get("BILLGUARD_REDIS_URL")
+        if redis_url:
+            sessions = RedisAuthSessions(
+                redis_module.Redis.from_url(redis_url, decode_responses=True))
+        return PGUserStore(pool, sessions=sessions), pool
     # 与 web.serve() 保持同一子树:<data-dir>/billguard/auth
     return UserStore(Path(args.data_dir) / "billguard" / "auth"), None
 

@@ -1009,11 +1009,14 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
         pool = new_pg_pool(pg_dsn)
         import redis
         redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
-        users_store = PGUserStore(pool)
+        redis_sessions = RedisAuthSessions(redis_client)
+        # 同一 RedisAuthSessions 实例交给用户库:改密/删户经反向索引
+        # 立即失效该用户全部登录令牌(与单进程 auth.py 联动清理对齐)
+        users_store = PGUserStore(pool, sessions=redis_sessions)
         if users_store.count() == 0:
             print("用户库为空,请先在 PostgreSQL(users 表)创建管理员账号后再启动。")
             raise SystemExit(1)
-        authenticator = Authenticator(users_store, RedisAuthSessions(redis_client))
+        authenticator = Authenticator(users_store, redis_sessions)
         mcp_manager.connect_streamable_http("bill", bill_mcp_url)
         mcp_manager.connect_streamable_http("work-items", work_item_mcp_url)
         policy_gateway = PolicyGateway(PGApprovalStore(pool))
