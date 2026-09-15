@@ -41,6 +41,13 @@ services:
     # serve() 启动即连 MCP,慢启动曾致容器永久退出;unless-stopped 自动重启
     # (compose kill/stop 属手动停止,不受重启策略影响,冒烟 A3/B3 流程不变)
     restart: unless-stopped
+    # streamable-http 无公开健康路径,TCP 能连上即为存活
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import socket; socket.create_connection(('127.0.0.1', 8010), timeout=2).close()"]
+      interval: 5s
+      retries: 10
+      start_period: 10s
 
   work-item-server:
     build: {context: ., dockerfile: docker/Dockerfile}
@@ -52,6 +59,12 @@ services:
     environment: *web_env
     volumes: [billdata:/data]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import socket; socket.create_connection(('127.0.0.1', 8020), timeout=2).close()"]
+      interval: 5s
+      retries: 10
+      start_period: 10s
 
   web-1: &web
     build: {context: ., dockerfile: docker/Dockerfile}
@@ -65,10 +78,24 @@ services:
       redis: {condition: service_healthy}
     # web-2 经 <<: *web 继承同一重启策略:MCP 慢启动致退出时自动重试
     restart: unless-stopped
+    # 镜像是 python:3.13-slim(无 curl),用 urllib 打自身 /api/health;
+    # 端口各不相同(8001/8002),web-2 必须覆写继承自锚点的本条健康检查
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/health', timeout=3)"]
+      interval: 5s
+      retries: 10
+      start_period: 30s
 
   web-2:
     <<: *web
     command: ["-m", "billguard.web", "--host", "0.0.0.0", "--port", "8002"]
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/api/health', timeout=3)"]
+      interval: 5s
+      retries: 10
+      start_period: 30s
 
   nginx:
     image: nginx:alpine

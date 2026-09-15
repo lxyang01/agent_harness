@@ -104,6 +104,16 @@ docker compose restart nginx # web 容器重建后必做(见下)
 
 web-1/web-2 被**重建**(`up --build` 或 `down` 后再 `up`)会拿到新容器 IP,而 nginx 的静态 upstream 只在 nginx 启动时解析一次 → 502 Bad Gateway;此时 `docker compose restart nginx` 重新解析即可。`kill`/`start` 复用同一容器、IP 不变,无此问题。
 
+### 备份与容量
+
+备份一条命令;恢复:清库后用 `psql` 重放 `backup.sql`,或 `docker compose down -v` 后由 `docker/init.sql` 重建表结构再重放。
+
+```bash
+docker compose exec -T postgres pg_dump -U billguard billguard > backup.sql
+```
+
+容量:每个 web 实例 PG 连接池 min 2 / max 8,默认部署 2 实例 = 最多 16 连接(PG 默认上限 100);水平扩实例时按此换算连接占用量。
+
 ### 测试(宿主机)
 
 前置:`docker compose up -d postgres redis`(套件连 PG `127.0.0.1:5433` / Redis `127.0.0.1:6380`)。
