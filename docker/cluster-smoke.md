@@ -12,8 +12,9 @@ PostgreSQL(`pgdata` 卷),会话锁/登录会话/LLM 限流在 Redis。
 > 关于 API Key:compose 对 web 服务做了 `OPENROUTER_API_KEY` /
 > `OPENAI_API_KEY` 透传,宿主机未设置时注入占位值 `e2e-smoke-key`。web 启动
 > 只检查变量**存在**,因此占位值足以让全部容器启动,完成 A 部分冒烟;
-> **占位 Key 无法完成真实模型调用**,发起对话会得到 5xx(请求失败)——这是
-> 预期行为,不是缺陷。B 部分必须设置真实 Key。
+> **占位 Key 无法完成真实模型调用**,对话请求会以 LLM 401 收场(实测返回
+> HTTP 200、status="failed",answer 里是模型错误信息;视错误类型也可能是
+> 5xx)——这是预期行为,不是缺陷。B 部分必须设置真实 Key。
 
 ---
 
@@ -72,8 +73,10 @@ python -X utf8 -c "import redis,hashlib; c=redis.Redis.from_url('redis://127.0.0
 curl -s -b /tmp/bg-cookie -H 'Content-Type: application/json' \
   -d '{"session_id":"smoke-lock-423","message":"冒烟测试"}' \
   -w '\nHTTP %{http_code}\n' http://127.0.0.1:8080/api/chat
-# 期望:非 423。占位 Key 下通常为 HTTP 500({"error": "请求失败:…"})——
-# 说明锁已放行、请求进入模型调用阶段;真实 Key 下应为 200。
+# 期望:非 423 即通过(锁已放行、请求进入模型调用阶段)。实测占位 Key 下
+# 为 HTTP 200(运行时把 LLM 401 包进 status="failed" 的正常响应返回);
+# 真实 Key 下同为 200 且 status="completed"。不同版本也可能以 500
+# ({"error": "请求失败:…"})呈现 —— 断言只看“离开 423”。
 ```
 
 > 断言要点:持锁时严格 423 且错误文案为上述中文;释放后状态码离开 423。
@@ -192,7 +195,15 @@ docker compose up -d postgres redis   # 恢复宿主机测试依赖
 
 ## 已知边界
 
-- 占位 Key(`e2e-smoke-key`)下一切对话类接口返回 5xx,属预期;A1–A4 不受影响。
+- 占位 Key(`e2e-smoke-key`)下一切对话类接口无法完成真实模型调用(实测
+  HTTP 200 + status="failed",answer 为模型错误信息;也可能 5xx),属预期;
+  A1–A4 不受影响。
+- **web 容器重建后需重启 nginx**:web-1/web-2 被重建(`up --build`/`down` 后
+  `up`)会拿到新容器 IP,而 nginx.conf 的静态 upstream(`server web-1:8001`)
+  只在 nginx 启动时解析一次,之后仍指向旧 IP → 502 Bad Gateway。A0 的恢复
+  路径(播种 admin 后 `up -d web-1 web-2`)正好会踩到:此时执行
+  `docker compose restart nginx` 重新解析即可。`kill`/`start` 复用同一容器、
+  IP 不变,无此问题(A3 的故障转移不踩)。
 - `ip_hash` 按客户端 IP 粘滞:单一宿主机压测始终命中同一 web 实例;
   如需强制分流,可从不同机器/网卡发起,或临时改 `docker/nginx.conf` 为轮询。
 - 集群内对抗评测会清空业务表(users 仅删 alice/mallory 夹具),不要在

@@ -14,6 +14,10 @@ def apply_streamable_bind(server: Any, host: str, port: int) -> None:
     端点以 421 Misdirected Request 拒绝。这里与 SDK 构造期的自动策略保持
     同一语义:非回环绑定不启用 Host/Origin 校验(Content-Type 校验始终
     保留);该形态下服务只监听内网/compose 网络端口,无浏览器直连面。
+
+    注意这是单向开关:非回环绑定停用防护后,再以回环地址重新绑定并不会
+    恢复构造期的 localhost 防护(当前无此类调用方,属潜在坑;如需支持,
+    应在回环分支显式重建 TransportSecuritySettings)。
     """
     from mcp.server.transport_security import TransportSecuritySettings
 
