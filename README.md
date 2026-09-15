@@ -178,21 +178,29 @@ sample_data/           # 带剧本的合成账单(生成器在 scripts/)
 
 ## 快速开始(功能预览)
 
-安装、建号、配置 API Key 与启动的完整命令见文末「命令速查」(**必须配置模型 API Key,系统只在真实模型模式下运行**)。服务跑起来后:打开 <http://127.0.0.1:8000> 登录(admin=用户管理+全部业务,user=业务写入+审批;每个用户的数据相互隔离,各自导入自己的账单副本)。
+安装(见文末「一次性安装」)之后,日常启动只有一种形态——**一条命令,系统自动拉起全部组件**(账单 MCP、工单 MCP、审批网关),不需要另开任何窗口:
 
 **三分钟演示剧本**(导入 `sample_data/bills_demo.csv` + `subscriptions_demo.csv` 后):
 
 1. 问守卫 Agent:**"最近有什么异常扣费"** → 检出腾讯视频涨价(预期 ¥15/月,8 月实扣 ¥25)
 2. 问:**"有没有重复扣费"** → 检出百度网盘同日 5 分钟内两笔 ¥18
 3. 问:**"生成本月守卫报告"** → 四章节报告(支出事实/异常清单/根因推测/行动计划)
-4. 问:**"帮我取消腾讯视频订阅"** → 接入 Work Item MCP 后走完整三阶段审批(见命令速查)
+4. 问:**"帮我取消腾讯视频订阅"** → 自动发起工单,走完整三阶段人工审批(审批中心批准/拒绝)
 5. 演示完想重来?导入面板右下角"**清空我的数据**" → 重新导入
 
 ## 命令速查
 
-**所有可用命令集中在本节。**
+### 日常启动(唯一需要记的)
 
-### 安装与首次启动
+```powershell
+# 在项目根目录执行;模型服务与参数按需替换,见下方"参考"
+$env:OPENROUTER_API_KEY="你的 Key"
+python -m billguard.web --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0.1:7897"
+```
+
+服务自动完成:用户鉴权检查、账单 MCP 子进程、工单 MCP 子进程、审批网关、有界线程池。带外工单管理仍可用 CLI(`work_item_server pending/approve/reject`,指向同一数据目录)。
+
+### 一次性安装(新人)
 
 ```powershell
 # 在项目根目录执行
@@ -202,38 +210,16 @@ python -m pip install -e .
 
 # 首次启动前创建管理员(交互输两次密码,至少 8 位)
 python -m billguard.users add admin --role admin
-
-# 配置模型 API Key(必填;支持 OpenRouter/DeepSeek 等任意 OpenAI 兼容服务)
-$env:OPENROUTER_API_KEY="你的 Key"
-
-# 启动(完整参数见下表;直连服务可省略 --llm-proxy)
-python -m billguard.web --base-url "https://openrouter.ai/api/v1" --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0.1:7897"
 ```
 
-### 服务启动与参数
+### 参考:模型服务选择(OpenAI 兼容三选一)
 
 ```powershell
-python -m billguard.web [--选项]
-```
-
-| 参数 | 默认 | 说明 |
-| --- | --- | --- |
-| `--tool-source local\|mcp` | local | 本地工具或 MCP 动态发现 |
-| `--work-item-mcp-url` | 空 | 接入远程 Work Item MCP(解锁三阶段审批演示) |
-| `--max-concurrent-llm` | 4 | 模型并发上限,超限 429 |
-| `--max-threads` / `--queue-capacity` | 16 / 32 | HTTP 线程池与排队容量,满载 503 |
-| `--run-timeout` | 120s | 单次 Agent 运行总预算,超限安全停止 |
-| `--data-dir` | .sessions | 数据根目录 |
-| `--llm-proxy` / `--base-url` / `--model` | — | 模型接入三件套 |
-
-### 更换模型服务(均为 OpenAI 兼容)
-
-```powershell
-# OpenRouter(需代理)
+# OpenRouter(需代理;--base-url 默认即此,故日常启动未显式传)
 $env:OPENROUTER_API_KEY="你的 Key"
-python -m billguard.web --base-url "https://openrouter.ai/api/v1" --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0.1:7897"
+python -m billguard.web --model "openai/gpt-4o-mini" --llm-proxy "http://127.0.0.1:7897"
 
-# DeepSeek 官方(直连,无需代理;Key 仍放 OPENROUTER_API_KEY 变量)
+# DeepSeek 官方(直连,无需代理)
 $env:OPENROUTER_API_KEY="你的 DeepSeek Key"
 python -m billguard.web --base-url "https://api.deepseek.com/v1" --model "deepseek-chat"
 
@@ -243,21 +229,18 @@ python -m billguard.web --base-url "http://127.0.0.1:11434/v1" --model "qwen2.5:
 
 不要将 API Key 写入代码或提交到 Git。
 
-### 远程 Work Item MCP(解锁三阶段审批演示)
+### 服务启动与参数
 
-```powershell
-# 窗口一:启动 Work Item MCP
-python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" serve --transport streamable-http --host 127.0.0.1 --port 8020
-# 窗口二:Web 接入
-python -m billguard.web --tool-source mcp --work-item-mcp-url "http://127.0.0.1:8020/mcp"
-```
-
-```powershell
-# 工单管理(带外审批也可走 Web 审批中心)
-python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" pending
-python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" approve "APR-XXXXXXXXXX" --by "product-owner"
-python -m billguard.mcp_servers.work_item_server --data-dir ".sessions/work-items" reject "APR-XXXXXXXXXX" --by "product-owner"
-```
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| --base-url | https://api.openai.com/v1 | 任意 OpenAI 兼容 API 地址 |
+| --model | gpt-4.1-mini | 模型名 |
+| --llm-proxy | 空 | 模型请求代理 |
+| --work-item-mcp-url | 空 | 高级选项:接入远程工单服务;缺省自动拉起本地 stdio 子进程 |
+| --max-concurrent-llm | 4 | 模型并发上限,超限 429 |
+| --max-threads / --queue-capacity | 16 / 32 | HTTP 线程池与排队容量,满载 503 |
+| --run-timeout | 120s | 单次 Agent 运行总预算,超限安全停止 |
+| --data-dir | .sessions | 数据根目录 |
 
 ### 用户管理 CLI
 
