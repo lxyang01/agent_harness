@@ -25,7 +25,7 @@ nginx :8080(ip_hash 负载均衡)
 ```
 
 - web 实例间零直接通信,一切经 Redis/PG;compose 服务名即服务发现
-- 宿主机端口:nginx `127.0.0.1:8080`;PG `127.0.0.1:5433`、Redis `127.0.0.1:6380` 供宿主机测试/评测直连
+- 宿主机端口:nginx `8080`(所有接口;如需仅本机访问可改为 `127.0.0.1:8080:80`);PG `127.0.0.1:5433`、Redis `127.0.0.1:6380` 仅本机监听,供宿主机测试/评测直连
 
 ### 存储分工
 
@@ -59,6 +59,8 @@ nginx :8080(ip_hash 负载均衡)
 | `BILLGUARD_BILL_MCP_URL` | `http://bill-server:8010/mcp` | 账单 MCP(streamable-http) |
 | `BILLGUARD_WORK_ITEM_MCP_URL` | `http://work-item-server:8020/mcp` | 工单 MCP(streamable-http) |
 | `OPENROUTER_API_KEY` / `OPENAI_API_KEY` | 宿主机透传 | web 启动仅检查变量**存在**;宿主机未设置时 compose 注入占位值 `e2e-smoke-key`,足以让全部容器启动并完成基础设施冒烟,**不能完成真实模型调用** |
+
+> 注:spec §5.1 所列环境变量 `BILLGUARD_MAX_CONCURRENT_LLM` 未实现;集群 LLM 并发上限经 `--max-concurrent-llm` 参数传入(默认 4,与 spec §5.1 默认一致)。
 
 ### 设计决策
 

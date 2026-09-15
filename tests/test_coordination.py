@@ -63,9 +63,12 @@ class LLMLimiterTests(unittest.TestCase):
 
 class AuthSessionTests(unittest.TestCase):
     def test_create_resolve_delete(self):
-        CLIENT.delete("auth:token:*")
+        # 原 CLIENT.delete("auth:token:*") 是字面量键 DEL(DEL 不支持通配),
+        # 恒为空操作;改为跟踪本测试创建的令牌精确清理,不碰其他测试的键。
+        # sessions.delete 幂等,与用例末尾的删除重复调用无害。
         sessions = RedisAuthSessions(CLIENT)
         token = sessions.create("alice")
+        self.addCleanup(sessions.delete, token)
         self.assertEqual("alice", sessions.resolve(token))
         self.assertIsNone(sessions.resolve("no-such-token"))
         sessions.delete(token)

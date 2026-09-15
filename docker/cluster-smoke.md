@@ -34,7 +34,7 @@ docker compose up --build -d postgres redis
 echo 'Smoke-Admin-1' | docker compose run --rm web-1 \
   -m billguard.users add admin --role admin --password-stdin
 docker compose up --build -d
-docker compose ps   # 六个服务均应 Up(healthy)
+docker compose ps   # 七个服务均应 Up(postgres/redis 显示 healthy)
 # 注意:宿主机跑过测试套件(tests/conftest.clean_stores)会清空 users 表,
 # 集群起不来时先重跑上面的播种命令再 up -d web-1 web-2。
 ```

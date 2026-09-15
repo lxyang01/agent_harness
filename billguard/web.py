@@ -780,7 +780,7 @@ _CAPABILITY_BY_PATH = {
     "/api/category-rules/delete": "bills_write",
     "/api/category-rules/rematch": "bills_write",
     "/api/bills/workflow": "bills_write",
-        "/api/bills/purge": "bills_write",
+    "/api/bills/purge": "bills_write",
     # 导出含未脱敏 note,按写级(bills_write)保护,所有登录用户均可导出
     "/api/bills/export": "bills_write",
     "/api/approvals/decide": "approval_decide",
@@ -788,7 +788,7 @@ _CAPABILITY_BY_PATH = {
     "/api/admin/users/role": "users_manage",
     "/api/admin/users/password": "users_manage",
     "/api/admin/users/disable": "users_manage",
-        "/api/admin/users/delete": "users_manage",
+    "/api/admin/users/delete": "users_manage",
 }
 
 

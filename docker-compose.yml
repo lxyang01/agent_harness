@@ -38,6 +38,9 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-e2e-smoke-key}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-e2e-smoke-key}
     volumes: [billdata:/data]
+    # serve() 启动即连 MCP,慢启动曾致容器永久退出;unless-stopped 自动重启
+    # (compose kill/stop 属手动停止,不受重启策略影响,冒烟 A3/B3 流程不变)
+    restart: unless-stopped
 
   work-item-server:
     build: {context: ., dockerfile: docker/Dockerfile}
@@ -48,6 +51,7 @@ services:
               "--port", "8020"]
     environment: *web_env
     volumes: [billdata:/data]
+    restart: unless-stopped
 
   web-1: &web
     build: {context: ., dockerfile: docker/Dockerfile}
@@ -59,6 +63,8 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+    # web-2 经 <<: *web 继承同一重启策略:MCP 慢启动致退出时自动重试
+    restart: unless-stopped
 
   web-2:
     <<: *web
