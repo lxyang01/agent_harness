@@ -857,7 +857,7 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
 
 def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions",
           docs_dir: str = "docs", model: str = "gpt-4.1-mini",
-          base_url: str = "https://api.openai.com/v1", tool_source: str = "local",
+          base_url: str = "https://api.openai.com/v1", tool_source: str = "mcp",
           mcp_timeout: float = 20.0, work_item_mcp_url: str = "",
           work_item_data_dir: str = ".sessions/work-items",
           llm_proxy: str | None = None, max_concurrent_llm: int = 4,
@@ -873,6 +873,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
         mcp_manager = MCPClientManager(request_timeout=mcp_timeout)
         project_root = Path(__file__).resolve().parent.parent
         bills_dir = (Path(data_dir) / "billguard" / "bills").resolve()
+        work_items_dir = (Path(work_item_data_dir)).resolve()
         mcp_manager.connect_stdio(
             "bill",
             sys.executable,
@@ -881,9 +882,20 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
             cwd=project_root,
         )
         if work_item_mcp_url:
+            # 高级选项:显式接入远程 Work Item 服务(覆盖自动 stdio 子进程)
             mcp_manager.connect_streamable_http("work-items", work_item_mcp_url)
+        else:
+            # 默认形态:工单服务作为 stdio 子进程自动拉起,用户无需另开窗口
+            mcp_manager.connect_stdio(
+                "work-items",
+                sys.executable,
+                ["-u", "-m", "billguard.mcp_servers.work_item_server",
+                 "--data-dir", str(work_items_dir),
+                 "serve", "--transport", "stdio"],
+                cwd=project_root,
+            )
     policy_gateway = PolicyGateway(ApprovalStore(Path(data_dir) / "billguard" / "policy")) if mcp_manager else None
-    work_item_store = WorkItemStore(work_item_data_dir) if work_item_mcp_url else None
+    work_item_store = WorkItemStore(work_item_data_dir) if mcp_manager else None
     auth_root = Path(data_dir) / "billguard" / "auth"
     users_store = UserStore(auth_root)
     if users_store.count() == 0:
@@ -923,11 +935,11 @@ def main() -> None:
     parser.add_argument("--base-url", default="https://api.openai.com/v1")
     parser.add_argument("--llm-proxy", default=None,
                         help="Optional HTTP proxy for model requests")
-    parser.add_argument("--tool-source", choices=("local", "mcp"), default="local",
-                        help="Use in-process tools or dynamically discovered MCP tools")
+    parser.add_argument("--tool-source", choices=("local", "mcp"), default="mcp",
+                        help="MCP 子进程工具(默认)或进程内本地工具(测试用)")
     parser.add_argument("--mcp-timeout", type=float, default=20.0)
     parser.add_argument("--work-item-mcp-url", default="",
-                        help="Optional remote Work Item MCP Streamable HTTP endpoint")
+                        help="高级选项:接入远程 Work Item 服务;缺省自动拉起本地 stdio 子进程")
     parser.add_argument("--work-item-data-dir", default=".sessions/work-items",
                         help="Shared Work Item store used for out-of-band web approval")
     parser.add_argument("--max-concurrent-llm", type=int, default=4,
