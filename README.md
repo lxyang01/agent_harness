@@ -1,5 +1,7 @@
 # BillGuard · 可审计的账单守卫 Agent(分布式版)
 
+[![CI](https://github.com/lxyang01/agent_harness/actions/workflows/ci.yml/badge.svg?branch=distributed)](https://github.com/lxyang01/agent_harness/actions/workflows/ci.yml)
+
 > 本分支(distributed)将 BillGuard 平移到无状态多实例部署:nginx + web×2 + PostgreSQL + Redis + 共享 MCP,一条命令起全集群。**永不合并回 main**;单进程零依赖版见 **main** 分支,两分支功能完全一致,差异只在部署形态与并发原语。
 
 BillGuard 是一个**框架无关的可审计 Agent Harness**:模型只能调用注册过的工具,不执行任意 SQL/Shell;金额与结论必须来自工具返回的真实数据;高风险写操作走三阶段审批(准备 → 人工批准 → 提交)。**23 条对抗探针**(零费用、确定性)验证提示注入、越权参数、伪造数字、跨用户数据窃取等攻击全部被拦截。业务载体是个人账单守卫:从账单与订阅 CSV 中发现涨价、重复扣费和大额离群,输出带证据的行动计划。

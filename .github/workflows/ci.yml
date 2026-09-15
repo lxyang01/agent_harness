@@ -1,6 +1,6 @@
 # CI:distributed 分支全量验证 —— 208 项单元测试 + 23 条对抗探针,
 # 跑在真实 PostgreSQL / Redis 服务容器上(与宿主机 compose 相同端口 5433/6380)。
-# 徽章:https://github.com/<owner>/<repo>/actions/workflows/ci.yml/badge.svg?branch=distributed
+# 徽章:https://github.com/lxyang01/agent_harness/actions/workflows/ci.yml/badge.svg?branch=distributed
 name: CI
 
 on:
@@ -38,7 +38,7 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v6
         with:
@@ -93,9 +93,11 @@ jobs:
         run: python -X utf8 -m unittest discover -s tests
 
       # adversarial_eval 的 main() 无论探针成败都以 0 退出,
-      # 故打印 metrics 后用 grep 校验 "failed": 0(期望 23/23)
+      # 故打印 metrics 后用 grep 校验 "failed": 0(期望 23/23);
+      # pipefail 让 python 自身崩溃也直接判失败,不依赖 grep 兜底
       - name: Adversarial evaluation (expect 23/23)
         run: |
+          set -o pipefail
           python -X utf8 -m billguard.adversarial_eval \
             --output-dir "$RUNNER_TEMP/adv-eval" --report "" \
             | tee "$RUNNER_TEMP/adv-metrics.json"
