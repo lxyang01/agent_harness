@@ -9,6 +9,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,8 @@ from .auth import (AuthError, PermissionDenied, can, clear_session_cookie,
                    session_cookie)
 from .auth import AuthSessionStore, Authenticator, UserStore
 from .bills import WORKFLOW_STATUSES, BillFilters, BillService
+from .coordination import (LockedError, RedisAuthSessions, RedisLLMLimiter,
+                           RedisSessionLock)
 from .guardrails import MAX_HTTP_REQUEST_BYTES, validate_user_input
 from .evaluation import EvaluationReportStore
 from .llm import OpenAICompatibleLLM
@@ -38,6 +41,42 @@ CRLF = chr(13) + chr(10)  # 避免 bash heredoc 转义歧义
 
 class BusyError(RuntimeError):
     """429: all model-concurrency slots are taken; retry shortly."""
+
+
+class _RedisSessionGuard:
+    """已获取的 Redis 会话锁,包装为 with 语义;退出临界区即释放
+    (release 带 holder 校验,只会释放自己持有的锁)。"""
+
+    def __init__(self, lock: RedisSessionLock) -> None:
+        self._lock = lock
+
+    def __enter__(self) -> "_RedisSessionGuard":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._lock.release()
+
+
+class _RedisLLMSlots:
+    """RedisLLMLimiter 适配器:提供与 threading.BoundedSemaphore 同构的
+    acquire(blocking=False)/release 调用面,chat/decide 调用点零改动。"""
+
+    def __init__(self, limiter: RedisLLMLimiter) -> None:
+        self._limiter = limiter
+
+    def acquire(self, blocking: bool = False) -> bool:
+        return self._limiter.acquire()
+
+    def release(self) -> None:
+        self._limiter.release()
+
+
+def _epoch_seconds(updated_at: Any) -> float:
+    """PG 的 updated_at(ISO 文本)→ 排序用秒;非法值按 0 处理。"""
+    try:
+        return datetime.fromisoformat(str(updated_at)).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
 
 
 class BoundedHTTPServer(ThreadingHTTPServer):
@@ -156,7 +195,12 @@ class BillGuardApp:
                  work_item_store: WorkItemStore | None = None,
                  authenticator: Any = None,
                  max_concurrent_llm: int = 4,
-                 run_timeout: float | None = None) -> None:
+                 run_timeout: float | None = None,
+                 bills: BillService | None = None,
+                 session_store: Any = None,
+                 evidence_store: Any = None,
+                 trace_store: Any = None,
+                 redis_client: Any = None) -> None:
         if max_concurrent_llm < 1:
             raise ValueError("max_concurrent_llm 必须不小于 1")
         self.data_dir = Path(data_dir)
@@ -164,15 +208,23 @@ class BillGuardApp:
         self.session_dir = guard_root / "sessions"
         self.evidence_dir = guard_root / "evidence"
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
-        self.bills = BillService(guard_root / "bills")
-        self.traces = TraceStore(self.session_dir)
+        # 分布式模式注入 PG 存储/Redis 客户端;全部缺省(None)时按 data_dir
+        # 构造文件版,与单进程模式完全一致(向后兼容)。
+        self.bills = bills if bills is not None else BillService(guard_root / "bills")
+        self.session_store = session_store
+        self.evidence_store = evidence_store
+        self.trace_store = trace_store
+        self.traces = trace_store if trace_store is not None else TraceStore(self.session_dir)
         self.evaluations = EvaluationReportStore(self.data_dir / "evaluations")
         self.llm = llm
         self.mcp_manager = mcp_manager
         self.policy_gateway = policy_gateway
         self.work_item_store = work_item_store
         self.authenticator = authenticator
-        self._llm_slots = threading.BoundedSemaphore(max_concurrent_llm)
+        self._redis_client = redis_client
+        self._llm_slots = (_RedisLLMSlots(RedisLLMLimiter(redis_client, max_concurrent_llm))
+                           if redis_client is not None
+                           else threading.BoundedSemaphore(max_concurrent_llm))
         self.run_timeout = run_timeout
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
@@ -181,15 +233,40 @@ class BillGuardApp:
         with self._locks_guard:
             return self._locks.setdefault(session_id, threading.Lock())
 
+    def _sessions(self) -> Any:
+        """会话存取入口:分布式模式为注入的 PGSessionStore,单进程为文件版。"""
+        return self.session_store if self.session_store is not None \
+            else SessionStore(self.session_dir)
+
+    def _session_exists(self, session_id: str) -> bool:
+        if self.session_store is not None:
+            return self.session_store.exists(session_id)
+        return SessionStore(self.session_dir)._path(session_id).exists()
+
+    def _session_guard(self, session_id: str):
+        """会话级互斥,统一 with 语义,覆盖 chat / decide_approval / delete_session
+        的整个临界区(含全部 Trace 写入):
+
+        - 分布式模式:RedisSessionLock(ttl = run_timeout + 60s 缓冲),跨实例互斥;
+          被占用时抛 LockedError,HTTP 层映射 423;释放走 holder 校验,只删自己的锁。
+        - 单进程模式:退回进程内 threading.Lock(与原行为一致)。"""
+        if self._redis_client is not None:
+            lock = RedisSessionLock(
+                self._redis_client, session_id,
+                ttl_ms=int((self.run_timeout or 120) * 1000 + 60_000))
+            if not lock.acquire():
+                raise LockedError("另一会话操作正在进行,请稍后重试")
+            return _RedisSessionGuard(lock)
+        return self._lock(session_id)
+
     def _scoped(self, user: Any):
         """按用户装配的受限账单视图:查询自动过滤,写入自动盖 owner 戳。"""
         return self.bills.for_user(user.username)
 
     def _require_session_access(self, user: Any, session_id: str) -> None:
-        store = SessionStore(self.session_dir)
-        if not store._path(session_id).exists():
+        if not self._session_exists(session_id):
             return
-        owner = store.load(session_id).owner
+        owner = self._sessions().load(session_id).owner
         if owner is None:
             if user.role != "admin":
                 raise PermissionDenied("该分析会话未分配归属,仅管理员可访问")
@@ -198,7 +275,7 @@ class BillGuardApp:
             raise PermissionDenied("该分析会话属于其他用户")
 
     def _claim_session(self, user: Any, session_id: str) -> None:
-        store = SessionStore(self.session_dir)
+        store = self._sessions()
         session = store.load(session_id)
         if session.owner is None:
             session.owner = user.username
@@ -206,7 +283,7 @@ class BillGuardApp:
 
     def snapshot(self, user: Any, session_id: str) -> dict[str, Any]:
         self._require_session_access(user, session_id)
-        session = SessionStore(self.session_dir).load(session_id)
+        session = self._sessions().load(session_id)
         evidence = self._load_evidence(session_id)
         scoped = self._scoped(user)
         messages = []
@@ -279,23 +356,38 @@ class BillGuardApp:
     def list_sessions(self, user: Any, active_session_id: str = "") -> list[dict[str, Any]]:
         """Return recoverable session names, newest first, for the sidebar."""
         sessions: list[dict[str, Any]] = []
-        self.session_dir.mkdir(parents=True, exist_ok=True)
-        for path in self.session_dir.glob("*.json"):
-            try:
-                value = json.loads(path.read_text(encoding="utf-8"))
-                session_id = value.get("session_id")
-                messages = value.get("messages", [])
+        if self.session_store is not None:
+            # 分布式模式:列表来自 PG(文件目录是各实例本地的,不可用作全集)
+            for value in self.session_store.list():
                 owner = value.get("owner")
                 if owner != user.username and not (owner is None and user.role == "admin"):
                     continue
+                session_id = value.get("session_id")
                 if isinstance(session_id, str) and session_id:
                     sessions.append({
                         "id": session_id,
-                        "message_count": sum(1 for item in messages if item.get("role") in {"user", "assistant"}),
-                        "updated_at": path.stat().st_mtime,
+                        "message_count": sum(1 for item in value.get("messages") or []
+                                             if item.get("role") in {"user", "assistant"}),
+                        "updated_at": _epoch_seconds(value.get("updated_at")),
                     })
-            except (OSError, json.JSONDecodeError, AttributeError, TypeError):
-                continue
+        else:
+            self.session_dir.mkdir(parents=True, exist_ok=True)
+            for path in self.session_dir.glob("*.json"):
+                try:
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                    session_id = value.get("session_id")
+                    messages = value.get("messages", [])
+                    owner = value.get("owner")
+                    if owner != user.username and not (owner is None and user.role == "admin"):
+                        continue
+                    if isinstance(session_id, str) and session_id:
+                        sessions.append({
+                            "id": session_id,
+                            "message_count": sum(1 for item in messages if item.get("role") in {"user", "assistant"}),
+                            "updated_at": path.stat().st_mtime,
+                        })
+                except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+                    continue
         if active_session_id and not any(item["id"] == active_session_id for item in sessions):
             sessions.append({"id": active_session_id, "message_count": 0, "updated_at": 0})
         return sorted(sessions, key=lambda item: (item["id"] != active_session_id, -item["updated_at"]))[:20]
@@ -310,7 +402,7 @@ class BillGuardApp:
             self._llm_slots.release()
 
     def _chat_locked(self, user: Any, session_id: str, message: str) -> dict[str, Any]:
-        with self._lock(session_id):
+        with self._session_guard(session_id):
             self._require_session_access(user, session_id)
             self._claim_session(user, session_id)
             agent = self._agent(user, session_id)
@@ -348,10 +440,14 @@ class BillGuardApp:
         return {"evaluations": self.evaluations.list()}
 
     def _agent(self, user: Any, session_id: str):
+        # 分布式模式注入 PG 会话/追踪存储;单进程传 None → 工厂按 data_dir
+        # 构造文件版 SessionStore/TraceLogger,与原行为一致。
         if self.mcp_manager is None:
             # 本地模式:工具注册表按当前用户装配受限视图,Agent 只能查/写本人数据
             return create_bill_agent(self.llm, session_id, self.session_dir, self._scoped(user),
-                                     run_timeout=self.run_timeout)
+                                     run_timeout=self.run_timeout,
+                                     sessions=self.session_store,
+                                     trace_writer=self.trace_store)
         # MCP 模式:工具注册完成后按当前用户注入 owner 身份(模型不可见、不可伪造)
         registry = ToolRegistry()
         for snapshot in self.mcp_manager.snapshots():
@@ -361,6 +457,8 @@ class BillGuardApp:
             policy_gateway=self.policy_gateway,
             registry=inject_owner_identity(registry, user.username),
             run_timeout=self.run_timeout,
+            sessions=self.session_store,
+            trace_writer=self.trace_store,
         )
 
     def decide_approval(self, user: Any, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -384,8 +482,9 @@ class BillGuardApp:
     def _decide_approval_locked(self, user: Any, session_id: str,
                                 approval_id: str, decision: str, note: str) -> dict[str, Any]:
         # 与 chat 共用同一把会话锁:审批恢复与进行中的对话都会加载并回写
-        # Session 文件,无锁并发会互相覆盖(丢失更新)。
-        with self._lock(session_id):
+        # Session 存储,无锁并发会互相覆盖(丢失更新)。分布式模式下该锁
+        # 来自 Redis,跨实例互斥;被占用抛 LockedError(HTTP 层映射 423)。
+        with self._session_guard(session_id):
             current = self.policy_gateway.store.get(approval_id)
             if current.session_id != session_id:
                 raise PolicyError("该审批不属于当前会话")
@@ -432,6 +531,9 @@ class BillGuardApp:
         return self.evidence_dir / f"{SessionStore._key(session_id)}.json"
 
     def _load_evidence(self, session_id: str) -> dict[str, list[dict[str, Any]]]:
+        if self.evidence_store is not None:
+            # 分布式模式:证据在 PG(按 (session_id, answer_hash) 主键,合并语义同文件版)
+            return self.evidence_store.load(session_id)
         path = self._evidence_path(session_id)
         if not path.is_file():
             return {}
@@ -442,6 +544,9 @@ class BillGuardApp:
             return {}
 
     def _save_evidence(self, session_id: str, answer: str, evidence: list[dict[str, Any]]) -> None:
+        if self.evidence_store is not None:
+            self.evidence_store.save(session_id, answer, evidence)
+            return
         if not evidence:
             return
         value = self._load_evidence(session_id)
@@ -587,19 +692,27 @@ class BillGuardApp:
     def delete_session(self, user: Any, session_id: str) -> dict[str, Any]:
         """Delete all persisted state owned by one exact session id."""
         self._require_session_access(user, session_id)
-        store = SessionStore(self.session_dir)
-        session_key = store._key(session_id)
-        targets = (
-            store._path(session_id),
-            self.session_dir / "traces" / f"{session_key}.jsonl",
-            self._evidence_path(session_id),
-        )
-        with self._lock(session_id):
-            deleted = False
-            for target in targets:
-                if target.is_file():
-                    target.unlink()
-                    deleted = True
+        with self._session_guard(session_id):  # 防与进行中的 chat/decide 并发删写
+            if self.session_store is not None:
+                # 分布式模式:删除 PG 中的会话/Trace/证据行
+                deleted = bool(self.session_store.delete(session_id))
+                if self.trace_store is not None:
+                    self.trace_store.delete(session_id)
+                if self.evidence_store is not None:
+                    self.evidence_store.delete(session_id)
+            else:
+                store = SessionStore(self.session_dir)
+                session_key = store._key(session_id)
+                targets = (
+                    store._path(session_id),
+                    self.session_dir / "traces" / f"{session_key}.jsonl",
+                    self._evidence_path(session_id),
+                )
+                deleted = False
+                for target in targets:
+                    if target.is_file():
+                        target.unlink()
+                        deleted = True
         with self._locks_guard:
             self._locks.pop(session_id, None)
         if self.policy_gateway is not None:
@@ -847,6 +960,8 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
                 self._json(400, {"error": str(exc)})
             except PermissionDenied as exc:
                 self._json(403, {"error": str(exc)})
+            except LockedError as exc:
+                self._json(423, {"error": str(exc)})  # 另一实例正在处理该会话
             except BusyError as exc:
                 self._json(429, {"error": str(exc)})
             except Exception as exc:
@@ -870,37 +985,79 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
     llm = OpenAICompatibleLLM(model, base_url=base_url, proxy=llm_proxy)
     mcp_manager = MCPClientManager(request_timeout=mcp_timeout)  # 单一启动:MCP 是唯一工具源
     project_root = Path(__file__).resolve().parent.parent
-    bills_dir = (Path(data_dir) / "billguard" / "bills").resolve()
-    work_items_dir = (Path(work_item_data_dir)).resolve()
-    mcp_manager.connect_stdio(
-        "bill",
-        sys.executable,
-        ["-u", "-m", "billguard.mcp_servers.bill_server",
-         "--data-dir", str(bills_dir)],
-        cwd=project_root,
-    )
-    # 工单服务作为 stdio 子进程自动拉起,用户无需另开窗口或配置
-    mcp_manager.connect_stdio(
-        "work-items",
-        sys.executable,
-        ["-u", "-m", "billguard.mcp_servers.work_item_server",
-         "--data-dir", str(work_items_dir),
-         "serve", "--transport", "stdio"],
-        cwd=project_root,
-    )
-    policy_gateway = PolicyGateway(ApprovalStore(Path(data_dir) / "billguard" / "policy")) if mcp_manager else None
-    work_item_store = WorkItemStore(work_item_data_dir) if mcp_manager else None
-    auth_root = Path(data_dir) / "billguard" / "auth"
-    users_store = UserStore(auth_root)
-    if users_store.count() == 0:
-        print("用户库为空,请先创建管理员:")
-        print('  python -m billguard.users --data-dir <data-dir> add admin --role admin')
-        raise SystemExit(1)
-    authenticator = Authenticator(users_store, AuthSessionStore(auth_root))
+    pg_dsn = os.environ.get("BILLGUARD_PG_DSN")
+    redis_url = os.environ.get("BILLGUARD_REDIS_URL")
+    pool = None
+    redis_client = None
+    app_stores: dict[str, Any] = {}
+    if pg_dsn and redis_url:
+        # 分布式模式:全部持久数据走 PG,协调(会话锁/LLM 限流/登录会话)走 Redis,
+        # MCP 服务器以 streamable-http 独立进程部署,本进程不再拉起 stdio 子进程。
+        from .storage_pg import (PGApprovalStore, PGBillService, PGEvidenceStore,
+                                 PGSessionStore, PGTraceStore, PGUserStore,
+                                 PGWorkItemStore, new_pg_pool)
+        bill_mcp_url = os.environ.get("BILLGUARD_BILL_MCP_URL", "").strip()
+        work_item_mcp_url = os.environ.get("BILLGUARD_WORK_ITEM_MCP_URL", "").strip()
+        missing = [name for name, value in (
+            ("BILLGUARD_BILL_MCP_URL", bill_mcp_url),
+            ("BILLGUARD_WORK_ITEM_MCP_URL", work_item_mcp_url)) if not value]
+        if missing:
+            print("分布式模式(BILLGUARD_PG_DSN + BILLGUARD_REDIS_URL 已设置)缺少 MCP 服务地址。")
+            print("请设置环境变量 " + " 与 ".join(missing)
+                  + ",并确保对应 MCP 服务器已以 --transport streamable-http 启动。")
+            raise SystemExit(1)
+        pool = new_pg_pool(pg_dsn)
+        import redis
+        redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
+        users_store = PGUserStore(pool)
+        if users_store.count() == 0:
+            print("用户库为空,请先在 PostgreSQL(users 表)创建管理员账号后再启动。")
+            raise SystemExit(1)
+        authenticator = Authenticator(users_store, RedisAuthSessions(redis_client))
+        mcp_manager.connect_streamable_http("bill", bill_mcp_url)
+        mcp_manager.connect_streamable_http("work-items", work_item_mcp_url)
+        policy_gateway = PolicyGateway(PGApprovalStore(pool))
+        work_item_store = PGWorkItemStore(pool)
+        app_stores = {
+            "bills": PGBillService(pool),
+            "session_store": PGSessionStore(pool),
+            "evidence_store": PGEvidenceStore(pool),
+            "trace_store": PGTraceStore(pool),
+            "redis_client": redis_client,
+        }
+    else:
+        # 单进程模式(现有逻辑不动):SQLite/文件存储 + stdio 子进程 MCP
+        bills_dir = (Path(data_dir) / "billguard" / "bills").resolve()
+        work_items_dir = (Path(work_item_data_dir)).resolve()
+        mcp_manager.connect_stdio(
+            "bill",
+            sys.executable,
+            ["-u", "-m", "billguard.mcp_servers.bill_server",
+             "--data-dir", str(bills_dir)],
+            cwd=project_root,
+        )
+        # 工单服务作为 stdio 子进程自动拉起,用户无需另开窗口或配置
+        mcp_manager.connect_stdio(
+            "work-items",
+            sys.executable,
+            ["-u", "-m", "billguard.mcp_servers.work_item_server",
+             "--data-dir", str(work_items_dir),
+             "serve", "--transport", "stdio"],
+            cwd=project_root,
+        )
+        policy_gateway = PolicyGateway(ApprovalStore(Path(data_dir) / "billguard" / "policy")) if mcp_manager else None
+        work_item_store = WorkItemStore(work_item_data_dir) if mcp_manager else None
+        auth_root = Path(data_dir) / "billguard" / "auth"
+        users_store = UserStore(auth_root)
+        if users_store.count() == 0:
+            print("用户库为空,请先创建管理员:")
+            print('  python -m billguard.users --data-dir <data-dir> add admin --role admin')
+            raise SystemExit(1)
+        authenticator = Authenticator(users_store, AuthSessionStore(auth_root))
     server = BoundedHTTPServer(
         (host, port), make_handler(BillGuardApp(
             data_dir, "docs", llm, mcp_manager, policy_gateway, work_item_store,
-            authenticator, max_concurrent_llm, run_timeout,
+            authenticator, max_concurrent_llm, run_timeout, **app_stores,
         )),
         max_threads=max_threads, queue_capacity=queue_capacity,
     )
@@ -914,6 +1071,10 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
         server.server_close()
         if mcp_manager is not None:
             mcp_manager.close()
+        if pool is not None:
+            pool.close()
+        if redis_client is not None:
+            redis_client.close()
         if isinstance(llm, OpenAICompatibleLLM):
             llm.close()
 

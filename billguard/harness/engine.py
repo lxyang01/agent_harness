@@ -4,6 +4,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .context import ContextBuilder
@@ -54,7 +55,8 @@ class HarnessEngine:
                  sessions: SessionStore, context_builder: ContextBuilder | None = None,
                  hooks: list[EventHook] | None = None,
                  skills: SkillRuntime | None = None,
-                 policy_gateway: PolicyGateway | None = None) -> None:
+                 policy_gateway: PolicyGateway | None = None,
+                 trace_writer: Any = None) -> None:
         missing = set(spec.tool_names) - set(tools.names())
         if missing:
             raise ValueError(f"AgentSpec references unregistered tools: {', '.join(sorted(missing))}")
@@ -66,7 +68,10 @@ class HarnessEngine:
         self.skills = skills
         self.policy_gateway = policy_gateway
         self.hooks = list(hooks or [])
-        self.trace_logger = TraceLogger(sessions.root)
+        # 分布式模式注入 trace_writer(如 PGTraceStore.append_event)时,Trace 走
+        # 注入存储;缺省(None)保持单进程 TraceLogger(sessions.root) 行为不变。
+        self.trace_writer = trace_writer
+        self.trace_logger = None if trace_writer is not None else TraceLogger(sessions.root)
         self.hooks.append(self._trace_hook)
 
     @staticmethod
@@ -632,6 +637,19 @@ class HarnessEngine:
                 continue
 
     def _trace_hook(self, event: RunEvent) -> None:
+        if self.trace_writer is not None:
+            # 与 TraceLogger.log 同构的记录结构(timestamp/event/trace_id/step/agent
+            # + 事件数据);写入注入的追踪存储(如 PGTraceStore),且只会发生在
+            # web 层会话锁内的 run/resume/finalize 期间(单写者,规避首写竞态)。
+            record = {"timestamp": datetime.now(timezone.utc).isoformat(),
+                      "event": event.event_type,
+                      "trace_id": event.trace_id,
+                      "step": event.step,
+                      "agent": self.spec.name,
+                      **event.data}
+            self.trace_writer.append_event(
+                event.session_id, event.trace_id, self.spec.name, record)
+            return
         key = self.sessions._key(event.session_id)
         self.trace_logger.log(
             key, event.event_type, trace_id=event.trace_id,

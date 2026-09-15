@@ -1332,6 +1332,22 @@ class PGSessionStore(_PooledStore):
         except (KeyError, TypeError) as exc:
             raise RuntimeError(f"cannot load session {session_id}: {exc}") from exc
 
+    def exists(self, session_id: str) -> bool:
+        """会话是否已存在(web 归属检查用;对应文件版 _path().exists())。"""
+        self._key(session_id)  # 与 load 一致,非法 session id 先拒绝
+        with self._connect() as db:
+            return db.execute(
+                "SELECT 1 AS present FROM sessions WHERE session_id = %s LIMIT 1",
+                (session_id,)).fetchone() is not None
+
+    def list(self) -> list[dict[str, Any]]:
+        """全部会话行(侧栏列表用):session_id/owner/messages/updated_at。"""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT session_id, owner, messages, updated_at FROM sessions "
+                "ORDER BY updated_at DESC").fetchall()
+        return [dict(row) for row in rows]
+
     def save(self, session: Session) -> None:
         # 历史压缩由 HarnessEngine.compress_history 按 AgentSpec 阈值负责;
         # 存储层只做持久化,不再隐藏改写会话。
@@ -1441,3 +1457,9 @@ class PGTraceStore(_PooledStore):
             raise ValueError(f"run not found: {trace_id}")
         events = self._with_session(row["events"], session_id)
         return {"summary": TraceStore._summary(trace_id, events), "events": events}
+
+    def delete(self, session_id: str) -> int:
+        """删除该会话全部 Trace(web.delete_session 用;对应删除 traces/*.jsonl)。"""
+        with self._connect() as db:
+            cursor = db.execute("DELETE FROM traces WHERE session_id = %s", (session_id,))
+            return cursor.rowcount

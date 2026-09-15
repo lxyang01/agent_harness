@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -10,7 +11,6 @@ from mcp.types import ToolAnnotations
 
 from ..work_items import WorkItemStore
 
-1
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False,
                             idempotentHint=True, openWorldHint=False)
 PREPARE_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
@@ -18,9 +18,26 @@ PREPARE_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
 COMMIT_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
                                idempotentHint=True, openWorldHint=False)
 
+# F6:进程级 PG 连接池单例;仅当设置了 BILLGUARD_PG_DSN 时才会创建。
+_PG_POOL = None
+
+
+def _build_store(data_dir: str | Path):
+    """存储工厂(F6):设置 BILLGUARD_PG_DSN 时用 PG(进程级单例连接池),
+    未设置时保持 SQLite 行为不变。CLI(approve/reject/pending)与 MCP 服务
+    共用本工厂,保证分布式模式下两处操作同一份工单数据。"""
+    global _PG_POOL
+    dsn = os.environ.get("BILLGUARD_PG_DSN")
+    if not dsn:
+        return WorkItemStore(data_dir)
+    from ..storage_pg import PGWorkItemStore, new_pg_pool  # 惰性导入:stdio 模式不依赖 psycopg
+    if _PG_POOL is None:
+        _PG_POOL = new_pg_pool(dsn)
+    return PGWorkItemStore(_PG_POOL)
+
 
 def build_server(data_dir: str | Path) -> FastMCP:
-    store = WorkItemStore(data_dir)
+    store = _build_store(data_dir)
     server = FastMCP(
         "Work Item MCP",
         instructions=(
@@ -108,7 +125,7 @@ def main() -> None:
     subparsers.add_parser("pending")
     args = parser.parse_args()
 
-    store = WorkItemStore(args.data_dir)
+    store = _build_store(args.data_dir)
     if args.command == "approve":
         print(json.dumps(store.decide(args.approval_id, True, args.by), ensure_ascii=False, indent=2))
         return

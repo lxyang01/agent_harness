@@ -115,15 +115,20 @@ def build_bill_registry(service: BillService) -> ToolRegistry:
 def create_bill_agent(llm: LLM, session_id: str, data_dir: str | Path = ".sessions",
                       service: BillService | None = None,
                       skill_dir: str | Path | None = None,
-                      run_timeout: float | None = None) -> HarnessEngine:
+                      run_timeout: float | None = None,
+                      sessions: SessionStore | None = None,
+                      trace_writer: Any = None) -> HarnessEngine:
+    """sessions/trace_writer 缺省(None)时按 data_dir 建文件版,行为与单进程一致;
+    分布式模式由 web 层注入 PGSessionStore/PGTraceStore。"""
     service = service or BillService(Path(data_dir) / "billguard")
     skill_dir = Path(skill_dir) if skill_dir is not None else Path(__file__).resolve().parents[2] / "skills"
     return HarnessEngine(
         replace(BILL_AGENT_SPEC, run_timeout=run_timeout),
         llm,
         build_bill_registry(service),
-        SessionStore(data_dir),
+        sessions if sessions is not None else SessionStore(data_dir),
         skills=SkillRuntime(skill_dir),
+        trace_writer=trace_writer,
     )
 
 
@@ -132,11 +137,15 @@ def create_mcp_bill_agent(llm: LLM, session_id: str, manager: MCPClientManager,
                           skill_dir: str | Path | None = None,
                           policy_gateway: PolicyGateway | None = None,
                           registry: ToolRegistry | None = None,
-                          run_timeout: float | None = None) -> HarnessEngine:
+                          run_timeout: float | None = None,
+                          sessions: SessionStore | None = None,
+                          trace_writer: Any = None) -> HarnessEngine:
     """Create the bill Agent from tools dynamically advertised by MCP servers.
 
     registry 允许调用方(如 web 层)在 manager.register_tools 完成后注入
-    owner 身份边界再交给 Harness;缺省时仍由 manager 即时发现并注册。"""
+    owner 身份边界再交给 Harness;缺省时仍由 manager 即时发现并注册。
+    sessions/trace_writer 缺省(None)时按 data_dir 建文件版,行为与单进程一致;
+    分布式模式由 web 层注入 PGSessionStore/PGTraceStore。"""
     if registry is None:
         registry = ToolRegistry()
         for snapshot in manager.snapshots():
@@ -149,7 +158,8 @@ def create_mcp_bill_agent(llm: LLM, session_id: str, manager: MCPClientManager,
         spec,
         llm,
         registry,
-        SessionStore(data_dir),
+        sessions if sessions is not None else SessionStore(data_dir),
         skills=SkillRuntime(skill_dir),
         policy_gateway=policy_gateway,
+        trace_writer=trace_writer,
     )
