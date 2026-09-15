@@ -1,0 +1,70 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: billguard
+      POSTGRES_PASSWORD: billguard
+      POSTGRES_DB: billguard
+    ports: ["127.0.0.1:5433:5432"]   # 宿主机测试直连
+    volumes:
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U billguard"]
+      interval: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:6380:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 10
+
+  bill-server:
+    build: {context: ., dockerfile: docker/Dockerfile}
+    command: ["-m", "billguard.mcp_servers.bill_server",
+              "--data-dir", "/data/bills",
+              "--transport", "streamable-http",
+              "--host", "0.0.0.0",
+              "--port", "8010"]
+    environment: &web_env
+      BILLGUARD_PG_DSN: postgresql://billguard:billguard@postgres:5432/billguard
+      BILLGUARD_REDIS_URL: redis://redis:6379/0
+    volumes: [billdata:/data]
+
+  work-item-server:
+    build: {context: ., dockerfile: docker/Dockerfile}
+    command: ["-m", "billguard.mcp_servers.work_item_server",
+              "--data-dir", "/data/work-items", "serve",
+              "--transport", "streamable-http",
+              "--host", "0.0.0.0",
+              "--port", "8020"]
+    environment: *web_env
+    volumes: [billdata:/data]
+
+  web-1: &web
+    build: {context: ., dockerfile: docker/Dockerfile}
+    command: ["-m", "billguard.web", "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      <<: *web_env
+      BILLGUARD_BILL_MCP_URL: http://bill-server:8010/mcp
+      BILLGUARD_WORK_ITEM_MCP_URL: http://work-item-server:8020/mcp
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  web-2:
+    <<: *web
+    command: ["-m", "billguard.web", "--host", "0.0.0.0", "--port", "8002"]
+
+  nginx:
+    image: nginx:alpine
+    ports: ["8080:80"]
+    volumes: ["./docker/nginx.conf:/etc/nginx/conf.d/default.conf"]
+    depends_on: [web-1, web-2]
+
+volumes:
+  pgdata:
+  billdata:
