@@ -856,8 +856,8 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
 
 
 def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions",
-          docs_dir: str = "docs", model: str = "gpt-4.1-mini",
-          base_url: str = "https://api.openai.com/v1", tool_source: str = "mcp",
+          model: str = "gpt-4.1-mini",
+          base_url: str = "https://api.openai.com/v1",
           mcp_timeout: float = 20.0,
           work_item_data_dir: str = ".sessions/work-items",
           llm_proxy: str | None = None, max_concurrent_llm: int = 4,
@@ -868,28 +868,26 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
         print("未配置模型 API Key:请先设置环境变量 OPENROUTER_API_KEY(或 OPENAI_API_KEY)。")
         raise SystemExit(1)
     llm = OpenAICompatibleLLM(model, base_url=base_url, proxy=llm_proxy)
-    mcp_manager: MCPClientManager | None = None
-    if tool_source == "mcp":
-        mcp_manager = MCPClientManager(request_timeout=mcp_timeout)
-        project_root = Path(__file__).resolve().parent.parent
-        bills_dir = (Path(data_dir) / "billguard" / "bills").resolve()
-        work_items_dir = (Path(work_item_data_dir)).resolve()
-        mcp_manager.connect_stdio(
-            "bill",
-            sys.executable,
-            ["-u", "-m", "billguard.mcp_servers.bill_server",
-             "--data-dir", str(bills_dir)],
-            cwd=project_root,
-        )
-        # 工单服务作为 stdio 子进程自动拉起,用户无需另开窗口或配置
-        mcp_manager.connect_stdio(
-            "work-items",
-            sys.executable,
-            ["-u", "-m", "billguard.mcp_servers.work_item_server",
-             "--data-dir", str(work_items_dir),
-             "serve", "--transport", "stdio"],
-            cwd=project_root,
-        )
+    mcp_manager = MCPClientManager(request_timeout=mcp_timeout)  # 单一启动:MCP 是唯一工具源
+    project_root = Path(__file__).resolve().parent.parent
+    bills_dir = (Path(data_dir) / "billguard" / "bills").resolve()
+    work_items_dir = (Path(work_item_data_dir)).resolve()
+    mcp_manager.connect_stdio(
+        "bill",
+        sys.executable,
+        ["-u", "-m", "billguard.mcp_servers.bill_server",
+         "--data-dir", str(bills_dir)],
+        cwd=project_root,
+    )
+    # 工单服务作为 stdio 子进程自动拉起,用户无需另开窗口或配置
+    mcp_manager.connect_stdio(
+        "work-items",
+        sys.executable,
+        ["-u", "-m", "billguard.mcp_servers.work_item_server",
+         "--data-dir", str(work_items_dir),
+         "serve", "--transport", "stdio"],
+        cwd=project_root,
+    )
     policy_gateway = PolicyGateway(ApprovalStore(Path(data_dir) / "billguard" / "policy")) if mcp_manager else None
     work_item_store = WorkItemStore(work_item_data_dir) if mcp_manager else None
     auth_root = Path(data_dir) / "billguard" / "auth"
@@ -901,7 +899,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
     authenticator = Authenticator(users_store, AuthSessionStore(auth_root))
     server = BoundedHTTPServer(
         (host, port), make_handler(BillGuardApp(
-            data_dir, docs_dir, llm, mcp_manager, policy_gateway, work_item_store,
+            data_dir, "docs", llm, mcp_manager, policy_gateway, work_item_store,
             authenticator, max_concurrent_llm, run_timeout,
         )),
         max_threads=max_threads, queue_capacity=queue_capacity,
@@ -925,14 +923,11 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--data-dir", default=".sessions")
-    parser.add_argument("--docs-dir", default="docs", help=argparse.SUPPRESS)
 
     parser.add_argument("--model", default="gpt-4.1-mini")
     parser.add_argument("--base-url", default="https://api.openai.com/v1")
     parser.add_argument("--llm-proxy", default=None,
                         help="Optional HTTP proxy for model requests")
-    parser.add_argument("--tool-source", choices=("local", "mcp"), default="mcp",
-                        help="MCP 子进程工具(默认)或进程内本地工具(测试用)")
     parser.add_argument("--mcp-timeout", type=float, default=20.0)
     parser.add_argument("--work-item-data-dir", default=".sessions/work-items",
                         help="Shared Work Item store used for out-of-band web approval")
@@ -945,8 +940,8 @@ def main() -> None:
     parser.add_argument("--queue-capacity", type=int, default=32,
                         help="请求排队容量,超出返回 503")
     args = parser.parse_args()
-    serve(args.host, args.port, args.data_dir, args.docs_dir, args.model,
-          args.base_url, args.tool_source, args.mcp_timeout,
+    serve(args.host, args.port, args.data_dir, args.model,
+          args.base_url, args.mcp_timeout,
           args.work_item_data_dir, args.llm_proxy, args.max_concurrent_llm,
           args.run_timeout, args.max_threads, args.queue_capacity)
 

@@ -231,6 +231,7 @@ python -m billguard.web --base-url "https://api.deepseek.com/v1" --model "deepse
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
+| --host / --port | 127.0.0.1 / 8000 | 监听地址与端口 |
 | --base-url | https://api.openai.com/v1 | 任意 OpenAI 兼容 API 地址 |
 | --model | gpt-4.1-mini | 模型名 |
 | --llm-proxy | 空 | 模型请求代理 |
@@ -238,6 +239,8 @@ python -m billguard.web --base-url "https://api.deepseek.com/v1" --model "deepse
 | --max-threads / --queue-capacity | 16 / 32 | HTTP 线程池与排队容量,满载 503 |
 | --run-timeout | 120s | 单次 Agent 运行总预算,超限安全停止 |
 | --data-dir | .sessions | 数据根目录 |
+| --mcp-timeout | 20s | MCP 子进程请求超时 |
+| --work-item-data-dir | .sessions/work-items | 工单数据目录(带外审批 CLI 与服务共用) |
 
 ### 用户管理 CLI
 
