@@ -336,8 +336,9 @@ class AdversarialEvaluator:
         单进程版每个探针独享一个临时目录;PG 共库下由“每探针前重置”提供等价
         隔离(前序探针的 alice/工单/审批/会话不会泄漏进下一探针),收尾再执行
         一次保证零残留。users 表只删评测夹具用户(alice/mallory),不动集群
-        真实账号;auth:token:*/auth:user:* 登录键为集群用户所有,评测不产生
-        也不清扫。"""
+        真实账号;login:fail:*/auth:token:*/auth:user:* 等登录键可能为集群
+        真实用户所有,重置不做整体清扫——adv-024 自产的 login/auth 键由探针
+        自身 try/finally 精确清除,这里仍只扫 lock:session:*/llm:slots。"""
         with self._pool.connection() as db:
             for table in FIXTURE_TABLES:
                 db.execute(f"DELETE FROM {table}")
