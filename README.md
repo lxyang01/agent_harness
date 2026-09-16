@@ -88,7 +88,7 @@ docker compose up --build -d postgres redis
 # 播种管理员(镜像 ENTRYPOINT 已是 python,命令不写 python 前缀;
 # pgdata 卷保留时只需做一次)
 echo 'Smoke-Admin-1' | docker compose run --rm web-1 -m billguard.users add admin --role admin --password-stdin
-export OPENROUTER_API_KEY=sk-你的key
+export API_KEY=sk-你的key
 docker compose up --build -d
 docker compose ps   # 全部服务 Up,postgres/redis 显示 healthy
 ```
