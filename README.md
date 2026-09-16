@@ -93,7 +93,7 @@ docker compose up --build -d
 docker compose ps   # 全部服务 Up,postgres/redis 显示 healthy
 ```
 
-真实对话需先在宿主机 `export OPENROUTER_API_KEY=...`(或 `OPENAI_API_KEY`)再 `up -d`。入口 `http://127.0.0.1:8080`;健康检查 `curl -s http://127.0.0.1:8080/api/health` 期望 `{"ok": true}`。
+本地访问 localhost:8080
 
 ### 日常启停
 
