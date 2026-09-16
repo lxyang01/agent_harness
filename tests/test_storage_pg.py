@@ -11,7 +11,7 @@ from typing import Any, Callable
 from psycopg_pool import ConnectionPool
 
 from billguard.auth import AuthError
-from billguard.bills import BillService
+from billguard.bills import BillFilters, BillService
 from billguard.policy import PolicyError, ToolPolicy
 from billguard.types import Message, Session
 from billguard.work_items import WorkItemError
@@ -180,6 +180,35 @@ class BillServiceTests(PGTestCase):
         self.assertEqual(1, updated["count"])
         audits = alice.transaction_audits("TX-001")
         self.assertEqual("alice", audits[-1]["operator"])
+
+
+class OverviewCoverageTests(PGTestCase):
+    # 移植自 tests/test_bills.py OverviewCoverageTests:覆盖区间随过滤集走
+    def test_overview_reports_data_coverage(self):
+        service = PGBillService(self.store_pool())
+        alice = service.for_user("alice")
+        alice.import_bills("demo.csv", demo_csv())
+        # 全量:demo 数据跨 2026-07-05..2026-08-06
+        overview = alice.overview()
+        self.assertEqual("2026-07-05", overview["data_from"])
+        self.assertEqual("2026-08-06", overview["data_to"])
+        # 非空过滤集:区间必须来自过滤后的行,而非全库
+        july = alice.overview(BillFilters(date_from="2026-07-01", date_to="2026-07-31"))
+        self.assertEqual(2, july["count"])
+        self.assertEqual("2026-07-05", july["data_from"])
+        self.assertEqual("2026-07-05", july["data_to"])
+
+    def test_overview_coverage_none_when_no_rows(self):
+        service = PGBillService(self.store_pool())
+        alice = service.for_user("alice")
+        alice.import_bills("demo.csv", demo_csv())
+        # 过滤后为空(如 9 月无数据):无覆盖区间可报
+        empty = alice.overview(BillFilters(date_from="2026-09-01", date_to="2026-09-30"))
+        self.assertEqual(0, empty["count"])
+        self.assertIsNone(empty["data_from"])
+        self.assertIsNone(empty["data_to"])
+        # bob 无任何数据:全量 overview 也无覆盖区间
+        self.assertIsNone(service.for_user("bob").overview()["data_from"])
 
 
 class ApprovalStoreTests(PGTestCase):

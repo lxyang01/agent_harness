@@ -44,6 +44,39 @@ class ImportTests(unittest.TestCase):
             self.assertEqual(0, result["imported_rows"])
 
 
+class OverviewCoverageTests(unittest.TestCase):
+    """overview 必须带出过滤后数据集的实际覆盖区间(空结果缺日期锚点会诱发模型编造年份)。"""
+
+    def test_overview_reports_data_coverage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service = BillService(Path(temp))
+            service.import_bills("demo.csv", demo_csv())
+            # 全量:demo 数据跨 2026-07-05..2026-08-06
+            overview = service.overview()
+            self.assertEqual("2026-07-05", overview["data_from"])
+            self.assertEqual("2026-08-06", overview["data_to"])
+            # 非空过滤集:区间必须来自过滤后的行,而非全库
+            july = service.overview(BillFilters(date_from="2026-07-01", date_to="2026-07-31"))
+            self.assertEqual(2, july["count"])
+            self.assertEqual("2026-07-05", july["data_from"])
+            self.assertEqual("2026-07-05", july["data_to"])
+
+    def test_overview_coverage_none_when_no_rows(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service = BillService(Path(temp))
+            service.import_bills("demo.csv", demo_csv())
+            # 过滤后为空(如 9 月无数据):无覆盖区间可报
+            empty = service.overview(BillFilters(date_from="2026-09-01", date_to="2026-09-30"))
+            self.assertEqual(0, empty["count"])
+            self.assertIsNone(empty["data_from"])
+            self.assertIsNone(empty["data_to"])
+            # 空库同理
+            fresh = BillService(Path(temp) / "fresh")
+            blank = fresh.overview()
+            self.assertIsNone(blank["data_from"])
+            self.assertIsNone(blank["data_to"])
+
+
 class SubscriptionTests(unittest.TestCase):
     def test_subscriptions_import_and_hike_detection(self):
         with tempfile.TemporaryDirectory() as temp:

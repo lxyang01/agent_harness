@@ -468,7 +468,9 @@ class BillService:
         with self._connect() as db:
             row = db.execute(
                 f"""SELECT COALESCE(SUM(amount), 0) AS total_amount, COUNT(*) AS count,
-                    COUNT(DISTINCT substr(paid_at, 1, 10)) AS active_days FROM transactions t{where}""",
+                    COUNT(DISTINCT substr(paid_at, 1, 10)) AS active_days,
+                    MIN(substr(paid_at, 1, 10)) AS data_from, MAX(substr(paid_at, 1, 10)) AS data_to
+                    FROM transactions t{where}""",
                 params).fetchone()
             pending = db.execute(
                 f"SELECT COUNT(*) FROM transactions t{where}{' AND' if where else ' WHERE'} t.status IN ('待核查','核查中')",
@@ -501,6 +503,10 @@ class BillService:
             "count": row["count"],
             "pending": pending,
             "avg_daily": round(row["total_amount"] / active_days, 2) if active_days else 0.0,
+            # 数据覆盖区间(min/max paid_at 的日期前缀):空结果集时为 None,
+            # 给模型一个日期锚点,避免它在“本月无支出”类回答里编造年份/区间
+            "data_from": row["data_from"],
+            "data_to": row["data_to"],
             "by_category": by_category,
             "top_merchants": top_merchants,
             "max_tx": dict(max_tx) if max_tx else None,
