@@ -4,9 +4,9 @@
 
 > 本分支(distributed)将 BillGuard 平移到无状态多实例部署:nginx + web×2 + PostgreSQL + Redis + 共享 MCP,一条命令起全集群。**永不合并回 main**;单进程零依赖版见 **main** 分支,两分支功能一致,差异在部署形态、并发原语与登录防护。
 
-BillGuard 是一个**框架无关的可审计 Agent Harness**:模型只能调用注册过的工具,不执行任意 SQL/Shell;金额与结论必须来自工具返回的真实数据;高风险写操作走三阶段审批(准备 → 人工批准 → 提交)。**23 条对抗探针**(零费用、确定性)验证提示注入、越权参数、伪造数字、跨用户数据窃取等攻击全部被拦截。业务载体是个人账单守卫:从账单与订阅 CSV 中发现涨价、重复扣费和大额离群,输出带证据的行动计划。
+BillGuard 是一个**框架无关的可审计 Agent Harness**:模型只能调用注册过的工具,不执行任意 SQL/Shell;金额与结论必须来自工具返回的真实数据;高风险写操作走三阶段审批(准备 → 人工批准 → 提交)。**24 条对抗探针**(零费用、确定性)验证提示注入、越权参数、伪造数字、跨用户数据窃取等攻击全部被拦截。业务载体是个人账单守卫:从账单与订阅 CSV 中发现涨价、重复扣费和大额离群,输出带证据的行动计划。
 
-本分支在集群形态下保留全部防线,并把并发防御重建在分布式原语上(Redis 会话锁、全集群 LLM 限额、PG 行锁审批恰好一次、Redis 登录失败计数),216 项单元测试与 23 条对抗探针在 PG/Redis 后端下全部通过(宿主机与集群内两端验证)。
+本分支在集群形态下保留全部防线,并把并发防御重建在分布式原语上(Redis 会话锁、全集群 LLM 限额、PG 行锁审批恰好一次、Redis 登录失败计数),216 项单元测试与 24 条对抗探针在 PG/Redis 后端下全部通过(宿主机与集群内两端验证)。
 
 ## 功能
 
@@ -14,7 +14,7 @@ BillGuard 是一个**框架无关的可审计 Agent Harness**:模型只能调用
 
 - **多实例无状态**:web-1 / web-2 任意实例可服务任意请求,kill 任一实例服务不中断,对话会话与登录态跨实例延续
 - **登录暴力破解防护**:按用户名+IP 失败计数,5 次锁定 10 分钟(Redis 计数;单进程模式为进程内计数),成功登录即清零;集群内经 nginx 的 X-Real-IP 识别客户端(nginx 强制覆写该头,web 端口不对外,不可伪造)
-- **全量验证**:216 项单元测试与 23 条对抗探针全部在 PG/Redis 后端下通过(宿主机与集群内两端验证)
+- **全量验证**:216 项单元测试与 24 条对抗探针全部在 PG/Redis 后端下通过(宿主机与集群内两端验证)
 - **一条命令拉起集群**:`docker compose up` 起 nginx + web×2 + PostgreSQL + Redis + 两个 MCP 服务
 
 ## 架构与技术
@@ -51,7 +51,7 @@ nginx :8080(ip_hash 负载均衡)
 | 会话锁 | 进程内 `threading.Lock`(per-session),同会话并发请求排队等待 | Redis `SET NX PX` 分布式锁,TTL = run_timeout + 60s;冲突**立即 423**,不排队;释放走 Lua 持有者校验,只删自己的锁 |
 | LLM 限流 | 进程内 `BoundedSemaphore`(上限 4),超限 429 | Redis Lua 原子 check-and-incr(`llm:slots`),全集群共享额度,超限 429;键 TTL 120s 自愈 |
 | 登录态 | 文件会话库,7 天滑动过期,改密/删户清理本地记录 | Redis 令牌键(键名即 token 的 sha256 摘要,原文不落盘)7 天 TTL、剩余 <6 天滑动续期;`auth:user:*` 反向索引让改密/删户整批失效该用户全部令牌 |
-| 登录防护 | 进程内失败计数(dict + Lock,固定窗口),按用户名+IP 5 次锁定 10 分钟 | Redis Lua 原子 INCR+EXPIRE(`login:fail:{sha256}`,固定窗口从首次失败起算),两实例共享计数,任一实例记满即全集群锁定;成功登录清零 |
+| 登录防护 | 无(仅 distributed 提供;单进程模式为进程内计数) | 按用户名+IP 失败计数,5 次锁定 10 分钟;Redis Lua 原子 INCR+EXPIRE(`login:fail:{sha256}`,固定窗口从首次失败起算),两实例共享计数,任一实例记满即全集群锁定;成功登录清零 |
 | 审批恰好一次 | SQLite 条件 UPDATE(`WHERE status='pending'` + rowcount 判定) | **同一条 SQL 一字不改**(仅占位符 `?`→`%s`),PG 行锁保证并发 decide 恰好一个生效 |
 | 线程池 | `BoundedHTTPServer` 有界线程池(16 线程 / 32 排队,满载 503) | 原样保留,每实例独立;全局容量 = 实例数 × max_threads |
 | MCP | stdio 子进程随 web 自动拉起 | streamable-http 独立容器(bill-server :8010 / work-item-server :8020) |
@@ -118,6 +118,8 @@ docker compose exec -T postgres pg_dump -U billguard billguard > backup.sql
 
 容量:每个 web 实例 PG 连接池 min 2 / max 8,默认部署 2 实例 = 最多 16 连接(PG 默认上限 100);水平扩实例时按此换算连接占用量。
 
+表结构演化目前依赖 `docker compose down -v` 后由 `docker/init.sql` 重建(演示定位;生产化需引入版本化迁移工具)。
+
 ### 测试(宿主机)
 
 前置:`docker compose up -d postgres redis`(套件连 PG `127.0.0.1:5433` / Redis `127.0.0.1:6380`)。
@@ -136,7 +138,7 @@ python -X utf8 -m unittest discover -s tests
 python -X utf8 -m billguard.adversarial_eval
 # 集群内(容器网络)
 docker compose exec web-1 python -m billguard.adversarial_eval
-# 期望:metrics "total": 23, "passed": 23, "failed": 0
+# 期望:metrics "total": 24, "passed": 24, "failed": 0
 ```
 
 评测为确定性本地探针(恶意脚本模型替身),不需要真实 Key;会清空业务表(users 仅删夹具 alice/mallory,不影响 admin),不要在存有真实数据的库上执行。
