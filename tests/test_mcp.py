@@ -277,6 +277,22 @@ class BillServerOwnerScopeTests(StoreTestCase):
         self.assertEqual(["LEG-1"], legacy_update["updated_tx_ids"])
 
 
+class WorkItemStoreTests(unittest.TestCase):
+    """SQLite 版 prepare_issue 返回契约:next_step 必须点名 commit_issue 与真实
+    approval_id。实测模型会在 prepare 后停步并向用户虚报“已发起申请”,
+    返回值本身要能引导下一步(两个后端同文案,PG 版见 test_storage_pg)。"""
+
+    def test_prepare_issue_next_step_directs_commit_with_actual_id(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = WorkItemStore(Path(temp))
+            prepared = store.prepare_issue("取消百度会员续费", "用户要求取消自动续费。", "high")
+            self.assertEqual(
+                {"approval_id", "status", "action", "payload", "expires_at", "next_step"},
+                set(prepared))
+            self.assertIn(f'commit_issue(approval_id="{prepared["approval_id"]}")',
+                          prepared["next_step"])
+
+
 class WorkItemMCPIntegrationTests(unittest.TestCase):
     """保留 SQLite 回退分支的端到端覆盖(F6 工厂 env 缺省 → WorkItemStore 文件版):
     - stdio/HTTP 子进程服务器全链路仍需无外部依赖即可运行(单进程部署形态);
@@ -316,6 +332,8 @@ class WorkItemMCPIntegrationTests(unittest.TestCase):
         })
         approval_id = prepared["approval_id"]
         self.assertEqual("pending", prepared["status"])
+        # MCP 工具原样透传存储层返回:next_step 同样点名 commit_issue 与真实 approval_id
+        self.assertIn(f'commit_issue(approval_id="{approval_id}")', prepared["next_step"])
         with self.assertRaises(MCPError):
             self.manager.call_tool("work-items", "commit_issue", {"approval_id": approval_id})
 

@@ -13,6 +13,20 @@ class WorkItemError(ValueError):
     pass
 
 
+def prepare_issue_next_step(approval_id: str) -> str:
+    """prepare_issue 返回的 next_step 指引:点明草稿态与必须紧接的 commit_issue 调用。
+
+    实测模型会在 prepare 后停步并对用户虚报“已发起申请”;把带真实 id 的
+    下一步调用写进返回值,让工具结果本身引导模型完成提交。SQLite 与 PG
+    两个后端共享本文案(storage_pg 导入,不复制)。"""
+    return (
+        f"工单草稿已创建(approval_id={approval_id})。"
+        f"必须紧接着调用 commit_issue(approval_id=\"{approval_id}\") 完成提交"
+        f"——只有 commit 才会生成人工审批卡片并暂停等待批准;"
+        f"未调用 commit_issue 前不得向用户宣称已发起申请。"
+    )
+
+
 @dataclass(frozen=True)
 class WorkItemStore:
     root: Path
@@ -100,7 +114,7 @@ class WorkItemStore:
             "action": "issue.create",
             "payload": payload,
             "expires_at": (now + timedelta(minutes=30)).isoformat(),
-            "next_step": "A human must approve this request outside the MCP tool channel before commit_issue.",
+            "next_step": prepare_issue_next_step(approval_id),
         }
 
     def decide(self, approval_id: str, approved: bool, decided_by: str) -> dict[str, Any]:

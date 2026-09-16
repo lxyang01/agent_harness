@@ -275,6 +275,17 @@ class WorkItemStoreTests(PGTestCase):
         self.assertEqual("consumed", final["status"])
         self.assertEqual(created["created"]["id"], final["issue_id"])
 
+    def test_prepare_issue_next_step_directs_commit_with_actual_id(self):
+        # 与 SQLite 版同契约(next_step 文案共享自 work_items):必须点名
+        # commit_issue 与真实 approval_id,防止模型在 prepare 后停步并虚报“已发起申请”
+        store = PGWorkItemStore(self.store_pool())
+        prepared = store.prepare_issue("取消百度会员续费", "用户要求取消自动续费。", "high")
+        self.assertEqual(
+            {"approval_id", "status", "action", "payload", "expires_at", "next_step"},
+            set(prepared))
+        self.assertIn(f'commit_issue(approval_id="{prepared["approval_id"]}")',
+                      prepared["next_step"])
+
 
 class SessionStoreTests(PGTestCase):
     def test_save_load_roundtrip_with_owner(self):

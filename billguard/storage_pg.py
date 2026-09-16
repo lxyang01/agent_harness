@@ -46,7 +46,7 @@ from .policy import ApprovalRequest, PolicyError, ToolPolicy
 from .session import SessionStore
 from .tools import ToolError
 from .types import Message, Session
-from .work_items import WorkItemError
+from .work_items import WorkItemError, prepare_issue_next_step
 
 __all__ = [
     "new_pg_pool", "PGUserStore", "PGBillService", "PGApprovalStore",
@@ -1185,8 +1185,9 @@ class PGWorkItemStore(_PooledStore):
             raise WorkItemError("evidence_refs cannot exceed 50 items")
         approval_id = f"APR-{uuid.uuid4().hex[:10].upper()}"
         now = datetime.now(timezone.utc)
-        next_step = ("A human must approve this request outside the MCP tool channel "
-                     "before commit_issue.")
+        # 与 SQLite 版同文案(import 自 work_items,不复制):点名必须紧接的
+        # commit_issue 调用,防止模型 prepare 后停步并虚报“已发起申请”
+        next_step = prepare_issue_next_step(approval_id)
         payload = {
             "title": title,
             "description": description,
