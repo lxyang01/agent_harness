@@ -66,7 +66,8 @@ nginx :8080(ip_hash 负载均衡)
 | `BILLGUARD_REDIS_URL` | `redis://redis:6379/0` | Redis 地址 |
 | `BILLGUARD_BILL_MCP_URL` | `http://bill-server:8010/mcp` | 账单 MCP(streamable-http) |
 | `BILLGUARD_WORK_ITEM_MCP_URL` | `http://work-item-server:8020/mcp` | 工单 MCP(streamable-http) |
-| `OPENROUTER_API_KEY` / `OPENAI_API_KEY` | 宿主机透传 | web 启动仅检查变量**存在**;宿主机未设置时 compose 注入占位值 `e2e-smoke-key`,足以让全部容器启动并完成基础设施冒烟,**不能完成真实模型调用** |
+| `API_KEY`(或 `OPENROUTER_API_KEY` / `OPENAI_API_KEY`) | `.env` / 宿主机透传 | 真实对话必填;**推荐写进仓库根目录 `.env`**(参照 `docker/.env.example`,compose 自动读取,已 gitignore)。全缺时 compose 注入占位值 `e2e-smoke-key`,容器可启动并完成基础设施冒烟,但不能真实调用模型 |
+| `BILLGUARD_LLM_MODEL` / `BILLGUARD_LLM_BASE_URL` | `openai/gpt-4.1-mini` / `https://openrouter.ai/api/v1` | 模型与端点(在 `.env` 里覆盖即可换模型;用 OpenAI 官方 Key 时端点改为 `https://api.openai.com/v1`) |
 
 > 注:spec §5.1 所列环境变量 `BILLGUARD_MAX_CONCURRENT_LLM` 未实现;集群 LLM 并发上限经 `--max-concurrent-llm` 参数传入(默认 4,与 spec §5.1 默认一致)。
 
@@ -93,7 +94,7 @@ docker compose up --build -d
 docker compose ps   # 全部服务 Up,postgres/redis 显示 healthy
 ```
 
-本地访问 localhost:8080
+真实对话:把 Key 写进 `.env`(上一步的 `API_KEY=...`;compose 自动读取,已 gitignore 不会提交,写 `OPENROUTER_API_KEY=...` 同样有效)。本地访问 `http://localhost:8080`(若浏览器走了代理打不开,关闭系统代理);健康检查 `curl -s http://localhost:8080/api/health` 期望 `{"ok": true}`。
 
 ### 日常启停
 

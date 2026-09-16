@@ -32,11 +32,12 @@ services:
     environment: &web_env
       BILLGUARD_PG_DSN: postgresql://billguard:billguard@postgres:5432/billguard
       BILLGUARD_REDIS_URL: redis://redis:6379/0
-      # API Key 透传:web 启动仅检查变量存在,缺省占位值让容器可启动供基础设施
-      # 冒烟(健康/会话锁/故障转移/对抗评测均不需要真实 Key);真实对话请在
-      # 宿主机 export OPENROUTER_API_KEY(或 OPENAI_API_KEY)后 up -d。
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-e2e-smoke-key}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-e2e-smoke-key}
+      # API Key 透传:web 启动仅检查变量存在;用户在 .env 里写 API_KEY 即可
+      # (OPENROUTER_API_KEY 同样有效,API_KEY 优先)。占位值只落在
+      # OPENROUTER_API_KEY,OPENAI_API_KEY 缺省留空——llm.py 优先读
+      # OPENAI_API_KEY,若它带占位值会遮住真实 Key(空串为 falsy,正确落穿)。
+      OPENROUTER_API_KEY: ${API_KEY:-${OPENROUTER_API_KEY:-e2e-smoke-key}}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes: [billdata:/data]
     # serve() 启动即连 MCP,慢启动曾致容器永久退出;unless-stopped 自动重启
     # (compose kill/stop 属手动停止,不受重启策略影响,冒烟 A3/B3 流程不变)
@@ -68,7 +69,11 @@ services:
 
   web-1: &web
     build: {context: ., dockerfile: docker/Dockerfile}
-    command: ["-m", "billguard.web", "--host", "0.0.0.0", "--port", "8001"]
+    # 模型端点默认 OpenRouter(与 OPENROUTER_API_KEY 透传配套);用 OpenAI 官方
+    # Key 时在宿主机 export BILLGUARD_LLM_BASE_URL/BILLGUARD_LLM_MODEL 后 up -d
+    command: ["-m", "billguard.web", "--host", "0.0.0.0", "--port", "8001",
+              "--base-url", "${BILLGUARD_LLM_BASE_URL:-https://openrouter.ai/api/v1}",
+              "--model", "${BILLGUARD_LLM_MODEL:-openai/gpt-4.1-mini}"]
     environment:
       <<: *web_env
       BILLGUARD_BILL_MCP_URL: http://bill-server:8010/mcp
@@ -89,7 +94,9 @@ services:
 
   web-2:
     <<: *web
-    command: ["-m", "billguard.web", "--host", "0.0.0.0", "--port", "8002"]
+    command: ["-m", "billguard.web", "--host", "0.0.0.0", "--port", "8002",
+              "--base-url", "${BILLGUARD_LLM_BASE_URL:-https://openrouter.ai/api/v1}",
+              "--model", "${BILLGUARD_LLM_MODEL:-openai/gpt-4.1-mini}"]
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/api/health', timeout=3)"]
