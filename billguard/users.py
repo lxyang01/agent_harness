@@ -32,8 +32,12 @@ def _store(args: argparse.Namespace) -> tuple[UserStore, "object | None"]:
         import redis as redis_module
 
         from .coordination import RedisAuthSessions
+        from .migrate import require_current
         from .storage_pg import PGUserStore, new_pg_pool
         pool = new_pg_pool(dsn)
+        # 启动门禁:首次播种(compose A0 的 users add)发生在任何 web 启动前,
+        # init.sql 挂载已移除,这里必须保证 schema 就绪;AUTO_MIGRATE=1 自补齐
+        require_current(pool, auto=os.environ.get("BILLGUARD_AUTO_MIGRATE") == "1")
         sessions = None
         redis_url = os.environ.get("BILLGUARD_REDIS_URL")
         if redis_url:

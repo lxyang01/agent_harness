@@ -38,10 +38,10 @@ nginx :8080(ip_hash 负载均衡)
 
 | 层 | 承载 | 内容 |
 | --- | --- | --- |
-| PostgreSQL(持久) | 13 张表,`docker/init.sql` 预建 | users / transactions / categories / subscriptions / tx_audits / imports / reports / approvals / wi_approvals / issues,以及原 JSON/JSONL 文件改成的 sessions / evidence / traces 三张表(JSONB) |
+| PostgreSQL(持久) | 13 张表,`migrations/` 版本化迁移建表 | users / transactions / categories / subscriptions / tx_audits / imports / reports / approvals / wi_approvals / issues,以及原 JSON/JSONL 文件改成的 sessions / evidence / traces 三张表(JSONB) |
 | Redis(协调) | 5 类键 | `lock:session:{sha256}` 会话锁、`llm:slots` LLM 并发计数、`auth:token:{sha256}` 登录令牌、`auth:user:{username}` 令牌反向索引、`login:fail:{sha256}` 登录失败计数(5 次锁定 10 分钟,成功登录清零) |
 
-存储层 `billguard/storage_pg.py` 公开方法与单进程版同名同参(构造参数从目录换为连接池);表结构由 init.sql 预建,运行时不做任何 DDL。每 web 实例一个 psycopg3 连接池(min 2 / max 8)。
+存储层 `billguard/storage_pg.py` 公开方法与单进程版同名同参(构造参数从目录换为连接池);表结构由 `migrations/` 迁移预建(见下方「备份与容量」),运行时不做任何 DDL。每 web 实例一个 psycopg3 连接池(min 2 / max 8)。
 
 ### 与 main(单进程版)逐项对比
 
@@ -111,7 +111,7 @@ web-1/web-2 被**重建**(`up --build` 或 `down` 后再 `up`)会拿到新容器
 
 ### 备份与容量
 
-备份一条命令;恢复:清库后用 `psql` 重放 `backup.sql`,或 `docker compose down -v` 后由 `docker/init.sql` 重建表结构再重放。
+备份一条命令;恢复:清库后用 `psql` 重放 `backup.sql`,或 `docker compose down -v` 后由迁移自动重建表结构再重放。
 
 ```bash
 docker compose exec -T postgres pg_dump -U billguard billguard > backup.sql
@@ -119,7 +119,13 @@ docker compose exec -T postgres pg_dump -U billguard billguard > backup.sql
 
 容量:每个 web 实例 PG 连接池 min 2 / max 8,默认部署 2 实例 = 最多 16 连接(PG 默认上限 100);水平扩实例时按此换算连接占用量。
 
-表结构演化目前依赖 `docker compose down -v` 后由 `docker/init.sql` 重建(演示定位;生产化需引入版本化迁移工具)。
+表结构演化走版本化迁移(`migrations/` 目录,`billguard/migrate.py` 手写 runner,无第三方迁移框架依赖):
+
+- 每个版本一对纯 SQL 文件 `V<零填充序号>_<名称>.up.sql` / `.down.sql`;已应用版本记录在库内账本表 `schema_migrations`(由 runner 自建),apply 逐版本独立事务。
+- 常用命令:`python -m billguard.migrate --dsn postgresql://billguard:billguard@127.0.0.1:5433/billguard status|apply|rollback`(rollback 一次回滚最新一个版本;`ensure-database` 子命令可建库+全量应用,测试库 `billguard_test` 即由它引导)。
+- 集群自迁移:compose 已注入 `BILLGUARD_AUTO_MIGRATE=1`,web / MCP / users CLI 的 PG 入口建池后发现落后于 `migrations/` 会先自动应用再启动;不设该变量则启动即退出并打印待应用版本与确切修复命令。存量 pgdata 卷下次启动会被 V001 自动补账(V001 全程 `IF NOT EXISTS`,重放幂等)。
+- 回滚策略:演示环境优先 `down -v` 全量重置;需要精确回退时用 `rollback` 逐版本执行 `.down.sql`(V001 的 down 会 DROP 全部业务表,**清空数据**,执行前先备份)。改表永远发新版本文件,不改历史文件。
+- 索引变更注意:在存量数据上新建索引应在迁移 SQL 里使用 `CREATE INDEX CONCURRENTLY`(避免长事务锁表);CONCURRENTLY 不能在事务块内跑,与本 runner「每版本一事务」冲突,如需使用请单独用 psql 执行。
 
 ### 测试(宿主机)
 
@@ -127,10 +133,10 @@ docker compose exec -T postgres pg_dump -U billguard billguard > backup.sql
 
 ```bash
 python -X utf8 -m unittest discover -s tests
-# 期望:Ran 216 tests ... OK
+# 期望:Ran 226 tests ... OK
 ```
 
-注意:套件会清空 users 表;之后起集群需重跑首次启动的播种命令再 `up -d web-1 web-2`。
+套件连的是**独立测试库 `billguard_test`**(`tests/conftest.py` 的 `ensure_test_database` 自动建库并应用全部迁移,幂等),与演示集群的 `billguard` 库物理隔离 —— 跑测试不再清空演示库的 users/账单数据。对抗评测(`python -m billguard.adversarial_eval`)按设计仍指向演示库 `billguard`(可用 `BILLGUARD_PG_DSN` 覆盖),会清空其夹具表。
 
 ### 对抗评测
 

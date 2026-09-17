@@ -1074,6 +1074,10 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
                   + ",并确保对应 MCP 服务器已以 --transport streamable-http 启动。")
             raise SystemExit(1)
         pool = new_pg_pool(pg_dsn)
+        # 启动门禁:库落后于 migrations/ 时拒绝启动;BILLGUARD_AUTO_MIGRATE=1
+        # 则先自动补齐(compose 的 web_env 锚点已注入该变量,新卷自迁移)
+        from .migrate import require_current
+        require_current(pool, auto=os.environ.get("BILLGUARD_AUTO_MIGRATE") == "1")
         import redis
         redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
         redis_sessions = RedisAuthSessions(redis_client)

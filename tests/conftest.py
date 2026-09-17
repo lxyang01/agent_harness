@@ -6,6 +6,8 @@
 #
 # 职责:
 # - PG 连接池 / Redis 客户端工厂(compose:PG 5433 / Redis 6380/0)
+# - ensure_test_database:一次性引导独立测试库 billguard_test(建库+迁移,
+#   幂等)—— 测试套件与演示库 billguard 物理隔离,跑测试不再清演示数据
 # - clean_stores:清空全部业务表,保证共享库下测试可背靠背重跑(零状态残留)
 # - sweep_redis:按前缀清扫测试产生的 Redis 键(会话锁/登录令牌/LLM 槽位)
 # - seed_default_categories:播种 owner=NULL 的默认类别,对齐 SQLite 版
@@ -23,8 +25,30 @@ from psycopg_pool import ConnectionPool
 
 from billguard.bills import DEFAULT_CATEGORIES
 
-PG_DSN = "postgresql://billguard:billguard@127.0.0.1:5433/billguard"
+# 测试专用库 billguard_test:与演示集群的 billguard 库分离(同一 PG 实例),
+# clean_stores 只会清这张测试库;演示库仅供 adversarial_eval 等评测入口使用。
+PG_DSN = "postgresql://billguard:billguard@127.0.0.1:5433/billguard_test"
 REDIS_URL = "redis://127.0.0.1:6380/0"
+
+_TEST_DATABASE_READY = False
+
+
+def ensure_test_database() -> None:
+    """一次性引导测试库(幂等):不存在则创建 billguard_test 并应用全部
+    migrations/ 迁移;已存在且已迁移则为纯 no-op 探活。
+
+    模块导入时自动调用一次(进程内仅一次);PG 未启动时让套件以连接错误
+    快速失败,与既有行为一致。需要时也可显式调用(tests/test_migrate.py)。
+    """
+    global _TEST_DATABASE_READY
+    if _TEST_DATABASE_READY:
+        return
+    from billguard.migrate import ensure_database  # 惰性导入,保持 helper 纯净
+    ensure_database(PG_DSN)
+    _TEST_DATABASE_READY = True
+
+
+ensure_test_database()
 
 
 def lock_key(session_id: str) -> str:
@@ -36,7 +60,8 @@ def token_key(token: str) -> str:
     """登录令牌键(与 coordination.RedisAuthSessions 同构)。"""
     return f"auth:token:{hashlib.sha256(token.encode()).hexdigest()}"
 
-# 13 张业务表(docker/init.sql 预建);顺序无关,均为整表 DELETE
+# 13 张业务表(migrations/V001_init.up.sql 预建,账本表 schema_migrations
+# 由 migrate runner 自建、不在清理范围);顺序无关,均为整表 DELETE
 TABLES = ("tx_audits", "transactions", "categories", "subscriptions", "imports",
           "reports", "approvals", "wi_approvals", "issues", "sessions",
           "evidence", "traces", "users")

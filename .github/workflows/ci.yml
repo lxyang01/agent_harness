@@ -1,4 +1,4 @@
-# CI:distributed 分支全量验证 —— 216 项单元测试 + 24 条对抗探针,
+# CI:distributed 分支全量验证 —— 单元测试(测试库 billguard_test)+ 24 条对抗探针,
 # 跑在真实 PostgreSQL / Redis 服务容器上(与宿主机 compose 相同端口 5433/6380)。
 # 徽章:https://github.com/lxyang01/agent_harness/actions/workflows/ci.yml/badge.svg?branch=distributed
 name: CI
@@ -71,25 +71,25 @@ jobs:
               raise SystemExit("PG/Redis not reachable after 30s")
           EOF
 
-      # 服务容器不跑 docker-entrypoint-initdb.d(init.sql 未挂载),
-      # 由本步骤用 psycopg 以单次多语句 execute 铺表(本地已验证 13 表幂等)
-      - name: Apply docker/init.sql
+      # 表结构改由 migrations/ 管理:用 migrate runner 的 ensure-database 引导
+      # 独立测试库 billguard_test(不存在则建 + 应用全部迁移,幂等),单元测试
+      # 全部连该库 —— 与 adversarial_eval 缺省的演示库 billguard 物理分离
+      - name: Bootstrap test database (migrations)
         run: |
+          python -m billguard.migrate --dsn postgresql://billguard:billguard@127.0.0.1:5433/billguard_test ensure-database
           python -X utf8 - <<'EOF'
-          from pathlib import Path
           import psycopg
-          sql = Path("docker/init.sql").read_text(encoding="utf-8")
           with psycopg.connect(
-                  "postgresql://billguard:billguard@127.0.0.1:5433/billguard") as conn:
-              conn.execute(sql)
+                  "postgresql://billguard:billguard@127.0.0.1:5433/billguard_test") as conn:
               tables = conn.execute(
                   "SELECT count(*) FROM pg_tables WHERE schemaname='public'"
+                  " AND tablename <> 'schema_migrations'"
               ).fetchone()[0]
-          print(f"applied init.sql: {tables} tables in public schema")
+          print(f"billguard_test: {tables} business tables in public schema")
           assert tables == 13, f"expected 13 tables, got {tables}"
           EOF
 
-      - name: Unit tests (expect 216 OK)
+      - name: Unit tests (expect 226 OK)
         run: python -X utf8 -m unittest discover -s tests
 
       # adversarial_eval 的 main() 无论探针成败都以 0 退出,

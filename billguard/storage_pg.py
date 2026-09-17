@@ -6,7 +6,7 @@
 - new_pg_pool(dsn) 统一建池
 
 方言差异(相对 SQLite 版):
-- 表由 docker/init.sql 预建,本模块绝不 CREATE/DROP TABLE
+- 表由 migrations/V001_init.up.sql 建(migrate runner 预应用),本模块绝不 CREATE/DROP TABLE
 - 占位符 ? → %s;JSONB 参数用 psycopg.types.json.Jsonb,读回已是 dict/list
 - 金额 NUMERIC 读回 Decimal,每个读取边界 float(...) 归一
 - 布尔列直接用 Python bool / SQL TRUE,FALSE(不再 0/1)
@@ -210,7 +210,7 @@ class PGUserStore(_PooledStore):
 class PGBillService(_PooledStore, BillService):
     """BillService 的 PG 全量替换:继承纯函数与组合方法,数据访问逐方法换方言。
 
-    表结构以 docker/init.sql 为准;不建表、不播种全局默认类别
+    表结构以 migrations/V001_init.up.sql 为准;不建表、不播种全局默认类别
     (owner 首访的默认类别副本由 _ensure_user_categories 负责,与单进程版一致)。
     """
 
@@ -1029,7 +1029,7 @@ class PGBillService(_PooledStore, BillService):
 
 
 class PGApprovalStore(_PooledStore):
-    """PG 版审批存储;列名对齐 docker/init.sql(arguments/policy_reason/checkpoint/execution_result)。"""
+    """PG 版审批存储;列名对齐 migrations/V001_init.up.sql(arguments/policy_reason/checkpoint/execution_result)。"""
 
     def __init__(self, pool: ConnectionPool) -> None:
         self.pool = pool

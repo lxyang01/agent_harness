@@ -1,4 +1,5 @@
-# tests/test_storage_pg.py — PG 存储层测试;连接 compose PostgreSQL(127.0.0.1:5433)。
+# tests/test_storage_pg.py — PG 存储层测试;连接独立测试库 billguard_test
+# (compose PostgreSQL 127.0.0.1:5433,由 tests/conftest.ensure_test_database 引导)。
 # 断言体移植自单进程套件:test_bills.py / test_auth.py / test_concurrency.py /
 # test_mcp.py / test_session_owner.py / test_observability.py,构造参数换成 PG 版。
 from __future__ import annotations
@@ -27,7 +28,7 @@ from billguard.storage_pg import (
     new_pg_pool,
 )
 
-DSN = "postgresql://billguard:billguard@127.0.0.1:5433/billguard"
+from tests.conftest import PG_DSN as DSN  # 测试库(与演示库 billguard 分离)
 
 TABLES = ("tx_audits", "transactions", "categories", "subscriptions", "imports",
           "reports", "approvals", "wi_approvals", "issues", "sessions",

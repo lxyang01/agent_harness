@@ -35,9 +35,13 @@ echo 'Smoke-Admin-1' | docker compose run --rm web-1 \
   -m billguard.users add admin --role admin --password-stdin
 docker compose up --build -d
 docker compose ps   # 七个服务均应 Up(postgres/redis 显示 healthy)
-# 注意:宿主机跑过测试套件(tests/conftest.clean_stores)会清空 users 表,
-# 集群起不来时先重跑上面的播种命令再 up -d web-1 web-2。
 ```
+
+表结构不再由 init.sql 挂载预建:users CLI / web / MCP 的 PG 入口都带启动门禁,
+compose 已注入 `BILLGUARD_AUTO_MIGRATE=1` —— 全新 pgdata 卷上首次执行上面任一
+命令都会先自动应用 `migrations/` 全部迁移(输出「自动迁移:已应用版本 …」),
+存量旧卷则被 V001 幂等补账。宿主机跑测试套件也不再影响集群:套件连独立测试库
+`billguard_test`(见 README 测试节),users 表不会被清空。
 
 ### A1. 健康检查(经 nginx 入口)
 

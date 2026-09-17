@@ -55,6 +55,10 @@ def _build_service(data_dir: str | Path) -> BillService:
     from ..storage_pg import PGBillService, new_pg_pool  # 惰性导入:stdio 模式不依赖 psycopg
     if _PG_POOL is None:
         _PG_POOL = new_pg_pool(dsn)
+        # 启动门禁:schema 落后于 migrations/ 时拒绝服务;AUTO_MIGRATE=1 自补齐
+        from ..migrate import require_current
+        require_current(
+            _PG_POOL, auto=os.environ.get("BILLGUARD_AUTO_MIGRATE") == "1")
     return PGBillService(_PG_POOL)
 
 

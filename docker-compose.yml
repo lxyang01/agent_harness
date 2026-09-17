@@ -6,8 +6,11 @@ services:
       POSTGRES_PASSWORD: billguard
       POSTGRES_DB: billguard
     ports: ["127.0.0.1:5433:5432"]   # 宿主机测试直连
+    # 注意:不再挂载 init.sql。空库由 POSTGRES_DB 创建,schema 全部交给
+    # migrations/ 目录 + billguard.migrate(见下方 BILLGUARD_AUTO_MIGRATE);
+    # 存量 pgdata 卷(旧 init.sql 建过表)下次启动会被 V001 自动补账 ——
+    # V001 全程 IF NOT EXISTS,重放幂等,只新增 schema_migrations 记录。
     volumes:
-      - ./docker/init.sql:/docker-entrypoint-initdb.d/01-init.sql
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U billguard"]
@@ -32,6 +35,10 @@ services:
     environment: &web_env
       BILLGUARD_PG_DSN: postgresql://billguard:billguard@postgres:5432/billguard
       BILLGUARD_REDIS_URL: redis://redis:6379/0
+      # schema 启动门禁的自动模式:web/MCP/users 的 PG 入口建池后发现落后于
+      # migrations/ 时先自动应用再放行(新 pgdata 卷零手工步骤自迁移;
+      # bill-server/work-item-server 经 *web_env 锚点共享同一行为)
+      BILLGUARD_AUTO_MIGRATE: "1"
       # API Key 透传:web 启动仅检查变量存在;用户在 .env 里写 API_KEY 即可
       # (OPENROUTER_API_KEY 同样有效,API_KEY 优先)。占位值只落在
       # OPENROUTER_API_KEY,OPENAI_API_KEY 缺省留空——llm.py 优先读

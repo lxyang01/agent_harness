@@ -34,12 +34,15 @@ from .storage_pg import (
 from .tools import DocumentService, Tool, ToolError, ToolRegistry, calculator
 from .web import BillGuardApp, make_handler
 
-# 评测后端:env 可覆盖,缺省指向 compose 宿主机端口(PG 5433 / Redis 6380)。
+# 评测后端:env 可覆盖,缺省指向 compose 宿主机端口(PG 5433 / Redis 6380),
+# 且缺省 DSN 落在演示库 billguard 上 —— 对抗评测按设计跑演示库(夹具表仅清
+# FIXTURE_TABLES,users 仅删 alice/mallory 夹具账号)。测试套件不得复用本
+# 缺省:单测一律走 tests/conftest.PG_DSN(billguard_test,独立测试库)。
 # 容器内运行时 compose 注入 docker 网络地址,同一份代码宿主机/集群两端通用。
 DEFAULT_PG_DSN = "postgresql://billguard:billguard@127.0.0.1:5433/billguard"
 DEFAULT_REDIS_URL = "redis://127.0.0.1:6380/0"
 
-# 评测夹具涉及的 12 张业务表(与 docker/init.sql 对齐;users 表单独处理)
+# 评测夹具涉及的 12 张业务表(与 migrations/V001_init.up.sql 对齐;users 单独处理)
 FIXTURE_TABLES = ("tx_audits", "transactions", "categories", "subscriptions", "imports",
                   "reports", "approvals", "wi_approvals", "issues", "sessions",
                   "evidence", "traces")

@@ -1,5 +1,5 @@
 # tests/test_web_distributed.py — 分布式装配(web 层)测试;
-# 连接 compose PostgreSQL(127.0.0.1:5433)与 Redis(127.0.0.1:6380/0)。
+# 连接独立测试库 billguard_test(compose PG 127.0.0.1:5433)与 Redis(6380/0)。
 # 覆盖:同 session 并发 → LockedError(HTTP 层 423)、LLM 限流 → BusyError、
 # Authenticator×RedisAuthSessions×PGUserStore(含滑动续期)、
 # PG 存储 end-to-end(会话/追踪/证据/删除)、F6 MCP 服务器存储工厂。
@@ -35,8 +35,7 @@ from billguard.web import BillGuardApp, BusyError, make_handler
 
 from tests.llm_doubles import FinalLLM, ScriptedLLM
 
-DSN = "postgresql://billguard:billguard@127.0.0.1:5433/billguard"
-REDIS_URL = "redis://127.0.0.1:6380/0"
+from tests.conftest import PG_DSN as DSN, REDIS_URL  # 测试库(与演示库分离)
 
 TABLES = ("tx_audits", "transactions", "categories", "subscriptions", "imports",
           "reports", "approvals", "wi_approvals", "issues", "sessions",

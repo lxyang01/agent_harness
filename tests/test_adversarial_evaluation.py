@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,13 +17,25 @@ from billguard.storage_pg import (
     PGUserStore, PGWorkItemStore,
 )
 
-from tests.conftest import TABLES, pg_pool, redis_client
+from tests.conftest import PG_DSN, TABLES, pg_pool, redis_client
 
 
 class AdversarialEvaluationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        # 评测后端钉在测试库:模块缺省 DSN 指向演示库 billguard(供
+        # adversarial_eval 独立跑演示集群),测试里必须显式覆写为
+        # conftest.PG_DSN —— 否则 run() 清理的是演示库、断言查的是测试库。
+        cls._prev_dsn = os.environ.get("BILLGUARD_PG_DSN")
+        os.environ["BILLGUARD_PG_DSN"] = PG_DSN
         cls.report = AdversarialEvaluator().run()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if cls._prev_dsn is None:
+            os.environ.pop("BILLGUARD_PG_DSN", None)
+        else:
+            os.environ["BILLGUARD_PG_DSN"] = cls._prev_dsn
 
     def test_case_registry_loads(self):
         cases = AdversarialEvaluator().cases()
