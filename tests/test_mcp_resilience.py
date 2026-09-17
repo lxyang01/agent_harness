@@ -16,8 +16,13 @@ import unittest
 import urllib.request
 from pathlib import Path
 
+import httpx
+
 from billguard.harness import AgentSpec, HarnessEngine
-from billguard.mcp_runtime import MCPClientManager, MCPCircuitOpenError, MCPError
+from billguard.mcp_runtime import (
+    MCPClientManager, MCPCircuitOpenError, MCPError, _CircuitState,
+)
+from billguard.policy import ApprovalStore, PolicyGateway
 from billguard.session import SessionStore
 from billguard.tools import ToolRegistry
 from tests.llm_doubles import ScriptedLLM
@@ -235,6 +240,159 @@ class DegradationTests(ResilienceTestCase):
         response = engine.run("resilience-session", "列出我的行动项")
         self.assertEqual("completed", response.status)
         self.assertIn("暂时不可用", response.answer)
+
+
+class ApprovalDegradationTests(ResilienceTestCase):
+    """降级的高写工具不得落审计为“已执行”:审批恢复路径遇熔断降级时,
+    mark_execution 必须按失败记账(approval 状态 failed + execution_error),
+    审批卡如实显示执行失败,而运行本身仍以降级话术收尾。"""
+
+    def test_degraded_write_on_resume_is_not_recorded_executed(self):
+        registry = ToolRegistry()
+        registered = self.manager.register_tools(registry, SERVER)
+        gateway = PolicyGateway(ApprovalStore(self.root / "policy"))
+        engine = HarnessEngine(
+            AgentSpec(name="审批韧性测试", instructions="测试 Agent",
+                      tool_names=registered, max_steps=6),
+            CommitFlowLLM(),
+            registry,
+            SessionStore(self.root / "sessions"),
+            policy_gateway=gateway,
+        )
+
+        paused = engine.run("approval-session", "帮我取消视频会员订阅")
+        self.assertEqual("approval_pending", paused.status)
+        self.assertEqual("work-items.commit_issue", paused.approval["tool_name"])
+        approval_id = paused.approval["id"]
+
+        # 人工批准后、恢复执行前:服务死亡,工单服务器熔断 OPEN
+        gateway.store.decide(approval_id, True, "审批人")
+        self._kill_server()
+        with self.assertRaises(MCPError):
+            self.manager.call_tool(SERVER, "list_issues", {})  # 驱动熔断 OPEN
+        self.assertEqual("open", self.manager.circuit_state(SERVER))
+
+        resumed = engine.resume(approval_id)
+        # 运行存活:模型基于降级载荷给出降级话术
+        self.assertEqual("completed", resumed.status)
+        self.assertIn("暂时不可用", resumed.answer)
+        # 审计诚实:没有任何业务动作发生,审批不得显示“已执行”
+        approval = gateway.store.get(approval_id)
+        self.assertNotEqual("executed", approval.status)
+        self.assertEqual("failed", approval.status)
+        self.assertIn("熔断", approval.execution_error or "")
+
+
+class CommitFlowLLM:
+    """工单三段剧本:prepare(取真实 approval_id)→ commit(触发审批暂停)
+    → 恢复后的 final(降级话术)。resume 复用同一实例,剧本推进到第 3 步。"""
+
+    def __init__(self) -> None:
+        self.stage = 0
+
+    def complete(self, messages: list[dict], tools: list[dict]) -> str:
+        if self.stage == 0:
+            self.stage = 1
+            return json.dumps({"thought": "准备工单", "tool_call": {
+                "name": "work-items.prepare_issue",
+                "arguments": {"title": "取消视频会员订阅",
+                              "description": "用户要求取消自动续费。"}}}, ensure_ascii=False)
+        if self.stage == 1:
+            last_tool = next(m for m in reversed(messages) if m.get("role") == "tool")
+            approval_id = json.loads(last_tool["content"])["approval_id"]
+            self.stage = 2
+            return json.dumps({"thought": "提交工单", "tool_call": {
+                "name": "work-items.commit_issue",
+                "arguments": {"approval_id": approval_id}}}, ensure_ascii=False)
+        return json.dumps(
+            {"thought": "服务不可用,如实说明",
+             "final": "工单服务暂时不可用(熔断中),请稍后重试。"},
+            ensure_ascii=False)
+
+
+class ServerErrorClassificationTests(unittest.TestCase):
+    """服务端 5xx 是服务器错误而非连接死亡:不重连、不熔断,原样上抛;
+    408/429(上游自己的重试信号)与传输类错误仍属连接类。"""
+
+    @staticmethod
+    def _status_error(code: int) -> httpx.HTTPStatusError:
+        request = httpx.Request("POST", "http://upstream/mcp")
+        response = httpx.Response(code, request=request)
+        return httpx.HTTPStatusError(
+            f"Server error '{code}'", request=request, response=response)
+
+    @classmethod
+    def _classified(cls, exc: BaseException) -> bool:
+        wrapper = MCPError("upstream failed")
+        wrapper.__cause__ = exc
+        return MCPClientManager._is_connection_error(wrapper)
+
+    def test_http_status_error_classification_table(self):
+        self.assertFalse(self._classified(self._status_error(500)))
+        self.assertFalse(self._classified(self._status_error(502)))
+        self.assertFalse(self._classified(self._status_error(503)))
+        self.assertTrue(self._classified(self._status_error(408)))
+        self.assertTrue(self._classified(self._status_error(429)))
+        self.assertTrue(self._classified(httpx.ConnectError("connection refused")))
+        self.assertTrue(self._classified(TimeoutError()))
+
+    def test_persistent_500_never_trips_circuit(self):
+        audit: list[tuple[str, dict]] = []
+
+        class FiveHundredManager(MCPClientManager):
+            """_call_tool 恒定抛 raise_for_status 形态的 500。"""
+
+            async def _call_tool(self, server_name, tool_name, arguments):
+                raise MCPError("Server error '500 Internal Server Error'") from \
+                    self.__class__._status_error_static()
+
+            @staticmethod
+            def _status_error_static():
+                request = httpx.Request("POST", "http://upstream/mcp")
+                return httpx.HTTPStatusError(
+                    "Server error '500'", request=request,
+                    response=httpx.Response(500, request=request))
+
+        manager = FiveHundredManager(
+            request_timeout=2, reconnect_attempts=3, reconnect_backoff_base=0.01,
+            circuit_cooldown=60, audit_hook=lambda event, data: audit.append((event, data)))
+        self.addCleanup(manager.close)
+        with self.assertRaises(MCPError) as ctx:
+            manager.call_tool("bill", "aggregate", {})
+        self.assertIn("500", str(ctx.exception))  # 错误原样上抛,不被熔断话术替换
+        self.assertEqual("closed", manager.circuit_state("bill"))
+        self.assertNotIn("mcp_retry", [event for event, _ in audit])
+
+
+class HalfOpenExpiryTests(unittest.TestCase):
+    """半开状态过期兜底:探测线程异常中断(BaseException 越过 finally 回流)
+    会留下 recovering=False 的 half_open——不过期则永久快速失败。"""
+
+    def test_stale_half_open_re_admits_probe(self):
+        manager = MCPClientManager(
+            request_timeout=2, reconnect_attempts=1, reconnect_backoff_base=0.0,
+            circuit_cooldown=0.2, half_open_expiry=0.05)
+        self.addCleanup(manager.close)
+        circuit = _CircuitState()
+        circuit.state = "half_open"
+        circuit.recovering = False
+        circuit.half_open_at = time.monotonic() - 1.0  # 远超过期
+        manager._circuits["s"] = circuit
+        self.assertEqual("half_open", manager._admit_call("s"))  # 重新放行探测
+        self.assertTrue(circuit.recovering)
+
+    def test_fresh_half_open_still_fast_fails(self):
+        manager = MCPClientManager(
+            request_timeout=2, reconnect_attempts=1, reconnect_backoff_base=0.0,
+            circuit_cooldown=0.2, half_open_expiry=0.05)
+        self.addCleanup(manager.close)
+        circuit = _CircuitState()
+        circuit.state = "half_open"
+        circuit.recovering = False
+        circuit.half_open_at = time.monotonic()  # 刚进入,未过期
+        manager._circuits["s"] = circuit
+        with self.assertRaises(MCPCircuitOpenError):
+            manager._admit_call("s")
 
 
 class HealthRouteTests(unittest.TestCase):

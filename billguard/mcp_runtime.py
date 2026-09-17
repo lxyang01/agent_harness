@@ -106,11 +106,12 @@ class _CircuitState:
     在锁外执行(recovering 标志让并发调用者快速失败而非阻塞等待)。
     """
 
-    __slots__ = ("state", "opened_at", "recovering")
+    __slots__ = ("state", "opened_at", "half_open_at", "recovering")
 
     def __init__(self) -> None:
         self.state = "closed"      # closed | open | half_open
         self.opened_at = 0.0       # open 起始时刻(monotonic)
+        self.half_open_at = 0.0    # 进入 half_open 的时刻(过期兜底用)
         self.recovering = False    # 有界重连或半开探测正在进行
 
 
@@ -120,8 +121,10 @@ def _make_handler(manager: "MCPClientManager", server: str, tool: str) -> Callab
     web._make_owner_wrapper 同构)。
 
     熔断类失败(MCPCircuitOpenError)在此转为结构化降级结果而不是抛出:
-    ToolRegistry/引擎把该次调用记为成功,Agent 循环存活,模型可基于
-    {"error": ..., "degraded": true} 给出"服务暂不可用"的降级回答;
+    Agent 循环存活,模型可基于 {"error": ..., "degraded": true} 给出"服务
+    暂不可用"的降级回答。降级结果的记账由引擎按风险分级处理:读/低写工具
+    记为成功(保证运行能以降级话术收尾);高写工具由 HarnessEngine 记为
+    未执行(审批恢复路径 mark_execution(False),审计不落"已执行");
     其余 MCPError 保持抛出(注册表包为 ToolError → 既有 tool_error 路径)。"""
     def handler(**arguments: Any) -> Any:
         try:
@@ -138,7 +141,8 @@ class MCPClientManager:
                  audit_hook: AuditHook | None = None,
                  reconnect_attempts: int = 3,
                  reconnect_backoff_base: float = 1.0,
-                 circuit_cooldown: float = 60.0) -> None:
+                 circuit_cooldown: float = 60.0,
+                 half_open_expiry: float = 30.0) -> None:
         if request_timeout <= 0:
             raise ValueError("request_timeout must be positive")
         if reconnect_attempts < 1:
@@ -147,12 +151,17 @@ class MCPClientManager:
             raise ValueError("reconnect_backoff_base must be non-negative")
         if circuit_cooldown <= 0:
             raise ValueError("circuit_cooldown must be positive")
+        if half_open_expiry <= 0:
+            raise ValueError("half_open_expiry must be positive")
         self.request_timeout = request_timeout
         self.audit_hook = audit_hook
-        # 韧性参数(生产缺省:重连 3 次,退避 1s/2s/4s;熔断冷却 60s)
+        # 韧性参数(生产缺省:重连 3 次,退避 1s/2s/4s;熔断冷却 60s;
+        # 半开探测异常中断后的过期兜底 30s——防止 recovering=False 的
+        # half_open 永久快速失败)
         self.reconnect_attempts = reconnect_attempts
         self.reconnect_backoff_base = reconnect_backoff_base
         self.circuit_cooldown = circuit_cooldown
+        self.half_open_expiry = half_open_expiry
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._closed = False
@@ -276,10 +285,19 @@ class MCPClientManager:
                         f"MCP 服务 {server} 暂时不可用(熔断中,剩余 {math.ceil(remaining)} 秒),"
                         "请稍后重试")
                 circuit.state = "half_open"
+                circuit.half_open_at = time.monotonic()
                 circuit.recovering = True  # 半开只放一次探测,其余调用快速失败
                 self._audit("mcp_circuit_half_open", server=server)
                 return "half_open"
             if circuit.state == "half_open":
+                if (not circuit.recovering
+                        and time.monotonic() - circuit.half_open_at > self.half_open_expiry):
+                    # 探测线程异常中断(BaseException 越过 finally 回流)留下的
+                    # 过期半开状态:重新放行一次探测,避免永久快速失败
+                    circuit.half_open_at = time.monotonic()
+                    circuit.recovering = True
+                    self._audit("mcp_circuit_half_open", server=server, expired=True)
+                    return "half_open"
                 raise MCPCircuitOpenError(f"MCP 服务 {server} 正在探测恢复,请稍后重试")
             return "closed"
 
@@ -311,11 +329,18 @@ class MCPClientManager:
                             delay=round(delay, 3), error=str(last_error))
                 try:
                     self._submit(self._reconnect(server))
+                except MCPError as reconnect_exc:
+                    # 重连这一步失败(任何错误类别:拒连/超时/代理 5xx/握手失败)
+                    # = 会话未恢复,只算一次尝试,绝不视为"服务已恢复"
+                    last_error = reconnect_exc
+                    continue
+                try:
                     result = self._submit(self._call_tool(server, tool_name, arguments))
                 except MCPError as retry_exc:
                     last_error = retry_exc
                     if not self._is_connection_error(retry_exc):
-                        # 重连成功但调用本身失败:服务已恢复,按原语义抛出
+                        # 重连成功但调用本身失败(如工具参数错误):服务已
+                        # 恢复,关闭熔断后按原语义抛出
                         self._mark_recovered(server)
                         raise
                     continue
@@ -352,7 +377,12 @@ class MCPClientManager:
 
     @classmethod
     def _is_connection_error(cls, exc: BaseException) -> bool:
-        """沿 __cause__/__context__ 链判定连接类失败(见 _CONNECTION_ERROR_TYPES)。"""
+        """沿异常链判定连接类失败(见 _CONNECTION_ERROR_TYPES)。
+
+        只走显式因果链(__cause__ 与异常组子异常)。__context__ 是隐式继承
+        (在处理 A 的 except 块里抛出的无关异常 B 会带上 A 作上下文),
+        参与判定会把无关错误误分类为连接类——实测"no reconnect spec"曾因
+        上下文挂着先前的 500 而被误判、触发多余重连。"""
         seen: set[int] = set()
         stack: list[BaseException] = [exc]
         while stack:
@@ -367,16 +397,15 @@ class MCPClientManager:
             if isinstance(current, _CONNECTION_ERROR_TYPES):
                 return True
             if isinstance(current, httpx.HTTPStatusError):
-                # 5xx 视为服务不可达(如系统代理对死亡上游回 502);4xx 是配置/请求错误
-                if current.response.status_code >= 500:
+                # 仅 408/429(上游自己的"请重试"信号)按可重试连接类处理;
+                # 5xx/4xx 是服务端/请求错误而非连接死亡:不重连、不熔断,原样上抛
+                if current.response.status_code in (408, 429):
                     return True
             text = str(current).lower()
             if any(hint in text for hint in _CONNECTION_MESSAGE_HINTS):
                 return True
-            if current.__cause__ is not None:
+            if current.__cause__ is not None and current.__cause__ is not current:
                 stack.append(current.__cause__)
-            if current.__context__ is not None and current.__context__ is not current:
-                stack.append(current.__context__)
         return False
 
     async def _reconnect(self, name: str) -> MCPServerSnapshot:
@@ -400,10 +429,14 @@ class MCPClientManager:
         return snapshot
 
     def read_resource(self, server_name: str, uri: str) -> list[dict[str, Any]]:
+        """读远端资源。注意:本方法与 get_prompt 属启动期能力发现路径,调用
+        频度低,刻意不经过熔断/重连闸门(call_tool 才有);连接恢复后随新
+        连接自然可用。"""
         return self._submit(self._read_resource(server_name, uri))
 
     def get_prompt(self, server_name: str, name: str,
                    arguments: dict[str, str] | None = None) -> dict[str, Any]:
+        """取远端 Prompt 模板(启动期能力发现路径,不经过熔断闸门)。"""
         return self._submit(self._get_prompt(server_name, name, arguments or {}))
 
     def close(self) -> None:

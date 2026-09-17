@@ -486,9 +486,23 @@ class HarnessEngine:
                 tool=tool_name, result=result,
                 latency_ms=round((time.perf_counter() - tool_started) * 1000, 2),
             )
-            execution = _ToolExecution(payload, True)
-            if full_payloads is not None:
-                full_payloads.append(payload)  # 门禁用完整值,截断只影响模型可见面
+            if (isinstance(result, dict) and result.get("degraded") is True
+                    and "error" in result
+                    and self.tools.get(tool_name).policy.risk_level == "high_write"):
+                # 降级的高写工具 = 实际未执行(熔断/重连中没有任何业务动作发生)。
+                # 按失败记账:审批恢复路径 mark_execution(False) 让审批卡如实
+                # 显示"执行失败"而非"已执行";completed_tools 不追加。降级载荷
+                # 仍进上下文,模型可给出"服务暂不可用"的降级回答。
+                # (degraded 标记是 mcp_runtime._make_handler 的降级契约;本地
+                # 工具不产生该形态的结果。)
+                error = str(result["error"])
+                self._emit("tool_error", trace_id, session_id, step,
+                           tool=tool_name, error=error)
+                execution = _ToolExecution(payload, False, error)
+            else:
+                execution = _ToolExecution(payload, True)
+                if full_payloads is not None:
+                    full_payloads.append(payload)  # 门禁用完整值,截断只影响模型可见面
         except ToolError as exc:
             payload = json.dumps({"error": str(exc)}, ensure_ascii=False)
             self._emit(
