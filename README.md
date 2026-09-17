@@ -133,10 +133,10 @@ docker compose exec -T postgres pg_dump -U billguard billguard > backup.sql
 
 ```bash
 python -X utf8 -m unittest discover -s tests
-# 期望:Ran 226 tests ... OK
+# 期望:Ran 228 tests ... OK
 ```
 
-套件连的是**独立测试库 `billguard_test`**(`tests/conftest.py` 的 `ensure_test_database` 自动建库并应用全部迁移,幂等),与演示集群的 `billguard` 库物理隔离 —— 跑测试不再清空演示库的 users/账单数据。对抗评测(`python -m billguard.adversarial_eval`)按设计仍指向演示库 `billguard`(可用 `BILLGUARD_PG_DSN` 覆盖),会清空其夹具表。
+套件连的是**独立测试库 `billguard_test`**(`tests/conftest.py` 的 `ensure_test_database` 自动建库并应用全部迁移,幂等),与演示集群的 `billguard` 库物理隔离 —— 跑测试不再清空演示库的 users/账单数据。对抗评测(`python -m billguard.adversarial_eval`)缺省仍指向演示库 `billguard`(宿主机/集群内运行时如此,可用 `BILLGUARD_PG_DSN` 覆盖),会清空其夹具表;CI 里该步骤用 env 显式钉在 `billguard_test`(CI 的演示库是零表空壳)。
 
 ### 对抗评测
 

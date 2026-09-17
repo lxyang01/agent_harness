@@ -5,8 +5,12 @@
   同名 .down.sql;纯 SQL、可含多条语句(无参数时 psycopg 走 simple query
   协议,单次 execute 即可执行多语句),不要求一文件一语句。
 - 版本账本 schema_migrations(version TEXT PRIMARY KEY, applied_at TEXT NOT
-  NULL)由本 runner 自建,不出现在任何迁移文件里。
-- apply 的每个版本独立事务:up SQL 与版本记录同事务提交,失败整体回滚。
+  NULL)由本 runner 自建,不出现在任何迁移文件里;仅写路径(apply)建表 ——
+  读路径(status/pending/门禁检查)只读,账本不存在视为零版本已应用,
+  在演示库等任意库上查询不留工件。
+- apply 的每个版本独立事务:up SQL 与版本记录同事务提交,失败整体回滚;
+  事务先取 pg_advisory_xact_lock(固定锁号)串行化并发首启,后到者等待并在
+  锁内复查账本后跳过,不撞唯一键。
 
 CLI(中文输出,失败非零退出):
     python -m billguard.migrate --dsn <dsn> status      # 查看已应用/待应用
@@ -26,6 +30,7 @@ SystemExit(1),auto=True(环境变量 BILLGUARD_AUTO_MIGRATE=1)先自动补齐。
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import sys
@@ -35,7 +40,7 @@ from pathlib import Path
 
 import psycopg
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
-from psycopg.errors import DuplicateDatabase
+from psycopg.errors import DuplicateDatabase, UndefinedTable
 from psycopg_pool import ConnectionPool
 
 # 仓库根(billguard/ 的上一级);与 web.py serve() 的 project_root 同一解析方式,
@@ -45,6 +50,15 @@ MIGRATIONS_DIR = REPO_ROOT / "migrations"
 
 # 文件名形如 V001_init.up.sql;序号零填充,字典序 == 数值序
 _NAME_RE = re.compile(r"^V(?P<num>\d+)_(?P<name>.+)\.up\.sql$")
+
+# 首启并发 apply 串行化:每个 apply 事务先取集群级咨询锁,后到的 applier
+# 等待而非撞账本唯一键崩溃重启;获锁后在锁内复查账本,已被对端应用的版本
+# 直接跳过。锁号为固定常量:sha256("billguard.migrations") 前 8 字节按
+# 有符号 bigint 派生(跨进程/跨版本稳定,不受 Python 进程级随机 hash 影响):
+# int.from_bytes(hashlib.sha256(b"billguard.migrations").digest()[:8],
+#                "big", signed=True)
+MIGRATION_LOCK_ID = int.from_bytes(
+    hashlib.sha256(b"billguard.migrations").digest()[:8], "big", signed=True)
 
 
 @dataclass(frozen=True)
@@ -96,11 +110,18 @@ def _ensure_bookkeeping(db: psycopg.Connection) -> None:
 
 
 def applied_versions(pool: ConnectionPool) -> list[str]:
-    """已应用版本列表,按与 discover() 相同的序号规则升序。"""
-    with pool.connection() as db:
-        _ensure_bookkeeping(db)
-        versions = [row[0] for row in db.execute(
-            "SELECT version FROM schema_migrations").fetchall()]
+    """已应用版本列表,按与 discover() 相同的序号规则升序。
+
+    只读:账本表不存在(从未应用过迁移)视为零版本,绝不 CREATE ——
+    status/门禁检查跑在演示库等任意库上都不留工件;账本仅由写路径
+    (apply_all)创建。
+    """
+    try:
+        with pool.connection() as db:
+            versions = [row[0] for row in db.execute(
+                "SELECT version FROM schema_migrations").fetchall()]
+    except UndefinedTable:
+        return []
     return sorted(versions, key=_sort_key)
 
 
@@ -114,12 +135,21 @@ def pending(pool: ConnectionPool,
 def apply_all(pool: ConnectionPool,
               migrations_dir: Path = MIGRATIONS_DIR) -> list[str]:
     """应用全部待应用版本;每个版本独立事务(up SQL + 账本记录同提交),
-    已应用的跳过。返回本次新应用的版本号列表(空列表 = 已是最新)。"""
+    已应用的跳过。返回本次新应用的版本号列表(空列表 = 已是最新)。
+
+    并发首启(多容器同时 AUTO_MIGRATE)安全:每个事务先取
+    pg_advisory_xact_lock(提交即释放),后到者等待;获锁后复查账本,
+    对端已应用的版本跳过 —— 双方都干净返回,无唯一键冲突。
+    """
     applied_now: list[str] = []
     for mig in pending(pool, migrations_dir):
         sql = mig.up_path.read_text(encoding="utf-8")
         with pool.connection() as db:  # 连接上下文:正常退出即提交,异常即回滚
+            db.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK_ID,))
             _ensure_bookkeeping(db)
+            if db.execute("SELECT 1 FROM schema_migrations WHERE version = %s",
+                          (mig.version,)).fetchone():
+                continue  # 锁内复查:并发对端已抢先应用,幂等跳过(空事务提交)
             db.execute(sql)
             db.execute("INSERT INTO schema_migrations(version, applied_at) "
                        "VALUES (%s, %s)",

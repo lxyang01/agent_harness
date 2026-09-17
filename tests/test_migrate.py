@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 import io
+import threading
 import unittest
 from contextlib import redirect_stdout
 
+import psycopg
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg_pool import ConnectionPool
 
 from tests import conftest
@@ -84,6 +87,61 @@ class MigrateTestCase(unittest.TestCase):
         self.assertIn(rolled, migrate.applied_versions(self.pool))
         for name in BUSINESS_TABLES:
             self.assertIn(name, table_names(self.pool))
+
+    def test_read_paths_do_not_create_ledger(self) -> None:
+        """账本不存在的库上,读路径(applied_versions/pending/status)零副作用:
+        返回空集合且绝不 CREATE schema_migrations —— 演示库/任意库跑
+        status 不得留下空账本工件(在一次性 scratch 库上验证,用毕即删)。"""
+        scratch = "billguard_migrate_readonly_probe"
+        params = conninfo_to_dict(conftest.PG_DSN)
+        admin_dsn = make_conninfo(**{**params, "dbname": "postgres"})
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)')
+            admin.execute(f'CREATE DATABASE "{scratch}"')
+        try:
+            pool = ConnectionPool(make_conninfo(**{**params, "dbname": scratch}),
+                                  min_size=1, max_size=1, open=True)
+            try:
+                self.assertEqual(migrate.applied_versions(pool), [])
+                self.assertEqual([mig.version for mig in migrate.pending(pool)],
+                                 [mig.version for mig in migrate.discover()])
+                tables = table_names(pool)
+                self.assertNotIn("schema_migrations", tables)
+                self.assertEqual(tables, set())  # 全新库保持全空,零副作用
+            finally:
+                pool.close()
+        finally:
+            with psycopg.connect(admin_dsn, autocommit=True) as admin:
+                admin.execute(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)')
+
+    def test_concurrent_first_boot_serializes(self) -> None:
+        """两个 applier 同时首启空库:apply 事务先取 pg_advisory_xact_lock,
+        后到者等待并在锁内复查账本后跳过 —— 不撞账本唯一键,双方正常返回,
+        每个版本恰被一方应用。"""
+        self._rollback_to_empty()
+        results: list[list[str]] = []
+        errors: list[BaseException] = []
+
+        def applier() -> None:
+            pool = ConnectionPool(conftest.PG_DSN, min_size=1, max_size=1,
+                                  open=True)
+            try:
+                results.append(migrate.apply_all(pool))
+            except BaseException as exc:  # noqa: BLE001 —— 记录后统一断言
+                errors.append(exc)
+            finally:
+                pool.close()
+
+        threads = [threading.Thread(target=applier) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        versions = [mig.version for mig in migrate.discover()]
+        self.assertEqual(sorted(v for batch in results for v in batch),
+                         sorted(versions))  # 并集恰为全部版本,无重复应用
+        self.assertEqual(migrate.pending(self.pool), [])
 
     def test_require_current_gate(self) -> None:
         """启动门禁:落后 + auto=False 时 SystemExit(1) 并点名版本与命令;
