@@ -39,8 +39,8 @@ class AdversarialEvaluationTests(unittest.TestCase):
 
     def test_case_registry_loads(self):
         cases = AdversarialEvaluator().cases()
-        self.assertEqual(24, len(cases))
-        self.assertEqual([f"adv-{index:03d}" for index in range(1, 25)],
+        self.assertEqual(25, len(cases))
+        self.assertEqual([f"adv-{index:03d}" for index in range(1, 26)],
                          [case.id for case in cases])
         self.assertEqual("billguard-adversarial-v1", AdversarialEvaluator.BENCHMARK)
         self.assertTrue(all(callable(case.probe) for case in cases))
@@ -48,10 +48,10 @@ class AdversarialEvaluationTests(unittest.TestCase):
     def test_after_run_zero_residue(self):
         # 评测自带起止夹具清理:12 张业务表零行、夹具用户(alice/mallory)
         # 不存在、Redis 无会话锁/LLM 限流键(自清理契约,可背靠背重跑)。
-        # adv-024 额外自清登录失败计数与对照登录令牌:login:fail:* /
-        # auth:token:* / auth:user:* 同样零残留
+        # adv-024 额外自清登录失败计数与对照登录令牌,adv-025 自清探针登录
+        # 令牌:login:fail:* / auth:token:* / auth:user:* 同样零残留
         report = AdversarialEvaluator().run()
-        self.assertEqual(24, report["metrics"]["passed"])
+        self.assertEqual(25, report["metrics"]["passed"])
         pool = pg_pool()
         try:
             with pool.connection() as db:
@@ -100,7 +100,7 @@ class AdversarialEvaluationTests(unittest.TestCase):
 
     def test_fixed_attack_surface_and_honest_known_gaps(self):
         self.assertEqual("billguard-adversarial-v1", self.report["benchmark"])
-        self.assertEqual(24, self.report["dataset_size"])
+        self.assertEqual(25, self.report["dataset_size"])
         self.assertEqual(0, self.report["metrics"]["probe_errors"])
         results = {item["id"]: item for item in self.report["results"]}
         self.assertTrue(results["adv-003"]["passed"])
@@ -116,14 +116,15 @@ class AdversarialEvaluationTests(unittest.TestCase):
         self.assertTrue(results["adv-022"]["passed"])
         self.assertTrue(results["adv-023"]["passed"])
         self.assertTrue(results["adv-024"]["passed"])
-        self.assertEqual(24, self.report["metrics"]["passed"])
+        self.assertTrue(results["adv-025"]["passed"])
+        self.assertEqual(25, self.report["metrics"]["passed"])
         self.assertEqual(0, self.report["metrics"]["failed"])
 
     def test_metrics_match_results(self):
         passed = sum(item["passed"] for item in self.report["results"])
         self.assertEqual(passed, self.report["metrics"]["passed"])
-        self.assertEqual(24 - passed, self.report["metrics"]["failed"])
-        self.assertAlmostEqual(passed / 24, self.report["metrics"]["defense_rate"])
+        self.assertEqual(25 - passed, self.report["metrics"]["failed"])
+        self.assertAlmostEqual(passed / 25, self.report["metrics"]["defense_rate"])
 
     def test_cross_tenant_leak_probe_evidence(self):
         result = next(item for item in self.report["results"]

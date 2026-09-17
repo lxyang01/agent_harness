@@ -1,4 +1,4 @@
-# CI:distributed 分支全量验证 —— 单元测试(测试库 billguard_test)+ 24 条对抗探针,
+# CI:distributed 分支全量验证 —— 单元测试(测试库 billguard_test)+ 25 条对抗探针,
 # 跑在真实 PostgreSQL / Redis 服务容器上(与宿主机 compose 相同端口 5433/6380)。
 # 徽章:https://github.com/lxyang01/agent_harness/actions/workflows/ci.yml/badge.svg?branch=distributed
 name: CI
@@ -89,16 +89,16 @@ jobs:
           assert tables == 13, f"expected 13 tables, got {tables}"
           EOF
 
-      - name: Unit tests (expect 228 OK)
+      - name: Unit tests (expect 248 OK)
         run: python -X utf8 -m unittest discover -s tests
 
       # adversarial_eval 的 main() 无论探针成败都以 0 退出,
-      # 故打印 metrics 后用 grep 校验 "failed": 0(期望 24/24);
+      # 故打印 metrics 后用 grep 校验 "failed": 0(期望 25/25);
       # pipefail 让 python 自身崩溃也直接判失败,不依赖 grep 兜底。
       # DSN 必须钉在 billguard_test:评测缺省指向演示库 billguard,而 CI 的
       # 演示库只有 POSTGRES_DB 建出的空壳(init.sql 步骤已删,零张表),
       # 不覆写会直接 UndefinedTable
-      - name: Adversarial evaluation (expect 24/24)
+      - name: Adversarial evaluation (expect 25/25)
         env:
           BILLGUARD_PG_DSN: postgresql://billguard:billguard@127.0.0.1:5433/billguard_test
         run: |

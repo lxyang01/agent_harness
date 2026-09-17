@@ -825,6 +825,28 @@ class BillGuardApp:
 
 
 _AUTH_EXEMPT_POST = {"/api/auth/login"}
+
+
+def _same_origin(headers: Any) -> bool:
+    """POST 请求的 CSRF 同源校验:Origin(优先)或 Referer(兜底)任一存在时,
+    其 netloc 必须与请求自身的 Host 头一致(大小写不敏感;端口参与比较)。
+
+    设计权衡 —— 两个头都缺失时放行:浏览器对跨站 POST 必定携带 Origin
+    (Fetch/HTML 规范强制,Referer 亦有 Referrer-Policy 兜底),缺失即
+    非浏览器客户端(curl/测试脚本/服务间调用)。这类客户端没有 Cookie
+    自动附带语义,不在 CSRF 威胁模型内;若强制要求会破坏整个 API 与
+    测试套件。Cookie 已带 SameSite=Strict,本校验是纵深防御第二层。
+    Host 头由 nginx 原样透传($http_host,含端口),受害者浏览器无法在
+    跨站请求中伪造自身 Host,netloc 一致即可判定同源。"""
+    origin = headers.get("Origin")
+    referer = headers.get("Referer")
+    if not origin and not referer:
+        return True  # 非浏览器客户端:无跨站附带 Cookie 的攻击面
+    source = origin or referer  # Origin 优先;并存时 Referer 可能被裁剪,不可信
+    host = str(headers.get("Host") or "").strip().lower()
+    return bool(host) and urlparse(str(source)).netloc.strip().lower() == host
+
+
 _CAPABILITY_BY_PATH = {
     "/api/reports/save": "report_write",
     "/api/reports/delete": "report_write",
@@ -922,6 +944,12 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
                     password = str(body.get("password", ""))
                     if not username or not password:
                         raise ValueError("用户名和密码不能为空")
+                    # 登录也做同源校验:登录 CSRF(把受害者登进攻击者账号)
+                    # 是真实攻击类别;空凭据校验在此之前(同为非法请求时
+                    # 优先报参数错误,不给攻击者探测差异的信息)
+                    if not _same_origin(self.headers):
+                        self._json(403, {"error": "跨站请求被拒绝"})
+                        return
                     throttle = app.login_throttle
                     # 客户端 IP 识别:集群内全部流量必经 nginx,其 proxy_set_header
                     # 对 X-Real-IP 强制覆写,外部请求自带的该头到不了应用;
@@ -948,6 +976,11 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
                     user = app.authenticator.resolve_user(self.headers)
                 except AuthError as exc:
                     self._json(401, {"error": str(exc)})
+                    return
+                # CSRF 同源校验:跨站伪造的 Origin/Referer 在到达任何业务
+                # 逻辑之前被拒(攻击寄生于受害者 Cookie,故置于认证之后)
+                if not _same_origin(self.headers):
+                    self._json(403, {"error": "跨站请求被拒绝"})
                     return
                 capability = _CAPABILITY_BY_PATH.get(self.path)
                 if capability and not can(user.role, capability):

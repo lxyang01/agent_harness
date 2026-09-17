@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import re
 import secrets
 import sqlite3
@@ -286,13 +287,26 @@ def session_token_from_cookie(header: str) -> str | None:
     return None
 
 
+def _secure_cookies_enabled() -> bool:
+    """BILLGUARD_SECURE_COOKIES 为真值("1"/"true",大小写不敏感)时,
+    会话 Cookie 追加 Secure 属性(仅经 https 传输)。函数内读 env,
+    缺省关闭(演示部署是 http),测试可随时翻转。"""
+    return os.environ.get("BILLGUARD_SECURE_COOKIES", "").strip().lower() in {"1", "true"}
+
+
 def session_cookie(token: str) -> str:
-    return (f"{_COOKIE_NAME}={token}; HttpOnly; SameSite=Strict; Path=/; "
-            f"Max-Age={SESSION_TTL_DAYS * 86400}")
+    cookie = (f"{_COOKIE_NAME}={token}; HttpOnly; SameSite=Strict; Path=/; "
+              f"Max-Age={SESSION_TTL_DAYS * 86400}")
+    if _secure_cookies_enabled():
+        cookie += "; Secure"
+    return cookie
 
 
 def clear_session_cookie() -> str:
-    return f"{_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+    cookie = f"{_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+    if _secure_cookies_enabled():
+        cookie += "; Secure"
+    return cookie
 
 
 class Authenticator:

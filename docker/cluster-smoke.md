@@ -96,11 +96,11 @@ curl -s -w '\nHTTP %{http_code}\n' http://127.0.0.1:8080/api/health
 docker compose start web-1   # 恢复双实例
 ```
 
-### A4. 集群内对抗评测(验收头条:24/24 在容器内对 PG/Redis 通过)
+### A4. 集群内对抗评测(验收头条:25/25 在容器内对 PG/Redis 通过)
 
 ```bash
 docker compose exec web-1 python -m billguard.adversarial_eval
-# 期望输出 metrics:"total": 24, "passed": 24, "failed": 0, "probe_errors": 0
+# 期望输出 metrics:"total": 25, "passed": 25, "failed": 0, "probe_errors": 0
 ```
 
 评测为确定性本地探针(ScriptedLLM 恶意模型替身),不需要真实 Key。它会

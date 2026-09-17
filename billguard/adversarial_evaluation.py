@@ -315,6 +315,12 @@ class AdversarialEvaluator:
                 "前 5 次 401 并计入失败计数;第 6 次凭据正确仍返回 429(窗口内锁定不被正确密码绕过);同窗口内其他用户名正常登录不受牵连。",
                 "按 (用户名,IP) 失败计数固定窗口锁定,Redis 计数全实例共享;成功登录清零,窗口到期自愈。", self._login_bruteforce,
             ),
+            AdversarialCase(
+                "adv-025", "csrf", "critical", "跨站请求伪造(CSRF)",
+                "攻击者页面(evil.example)诱使已登录浏览器携带会话 Cookie 发起跨站 POST:一次伪造 Origin,一次不带 Origin 而伪造 Referer(老浏览器形态)。",
+                "两次伪造请求均 403;同一请求不带伪造头(非浏览器客户端)仍 200,合法流量不受影响。",
+                "全部 POST(含登录)执行 Origin/Referer 与 Host 的 netloc 同源校验;Cookie 自带 HttpOnly + SameSite=Strict 双保险。", self._csrf_forged_origin,
+            ),
         ]
 
     @contextmanager
@@ -1105,6 +1111,86 @@ class AdversarialEvaluator:
              "correct_password_attempt": statuses[5] if len(statuses) > 5 else None,
              "collateral_login": collateral,
              "throttle": "RedisLoginThrottle(max_failures=5, window_seconds=600)"},
+        )
+
+    @staticmethod
+    def _session_post(base: str, path: str, body: dict[str, Any],
+                      cookie: str, extra_headers: dict[str, str]) -> int:
+        """受害者浏览器形态的 POST:携带会话 Cookie(可选附加伪造头),返回状态码。"""
+        request = urllib.request.Request(
+            base + path, data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Cookie": cookie,
+                     **extra_headers},
+            method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                response.read()
+                return response.status
+        except urllib.error.HTTPError as exc:
+            exc.read()  # 排空错误响应体,释放连接
+            return exc.code
+
+    def _csrf_forged_origin(self, root: Path) -> ProbeResult:
+        # adv-025:CSRF。全程不涉及 LLM——攻击载体是受害者浏览器,直接打真实
+        # HTTP handler(临时端口上的真实 make_handler,与 serve() 同一份代码):
+        # 先正常登录拿会话 Cookie(CSRF 寄生于该登录态),再以 evil.example
+        # 的 Origin / Referer 对 /api/bills/export 发起跨站 POST。urllib 缺省
+        # Host 头即目标 netloc(与真实浏览器同构),对照请求不带伪造头即
+        # "非浏览器客户端"形态,应保持 200。
+        sessions = RedisAuthSessions(self._redis_client)
+        users = PGUserStore(self._pool, sessions=sessions)
+        self._ensure_user(users, "alice", "alice-pass-123", "user")
+        work_items = PGWorkItemStore(self._pool)
+        app = self._distributed_app(root, QueueLLM([]), _AuthFakeManager(work_items),
+                                    work_items, users)
+
+        class _QuietHandler(make_handler(app)):
+            # 评测输出保持干净:攻击序列记录在 evidence,不重复打印访问日志
+            def log_message(self, fmt: str, *args: Any) -> None:
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _QuietHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        cookie = ""
+        statuses: dict[str, int] = {}
+        try:
+            # 受害者浏览器先正常登录(无伪造头 → 放行),取 Set-Cookie 中的令牌
+            login = urllib.request.Request(
+                base + "/api/auth/login",
+                data=json.dumps({"username": "alice",
+                                 "password": "alice-pass-123"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(login, timeout=10) as response:
+                cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+            # 攻击 A:evil.example 页面发起的跨站 POST(现代浏览器必带 Origin)
+            statuses["forged_origin"] = self._session_post(
+                base, "/api/bills/export", {"filters": {}}, cookie,
+                {"Origin": "http://evil.example"})
+            # 攻击 B:老浏览器形态,无 Origin 而带伪造 Referer
+            statuses["forged_referer"] = self._session_post(
+                base, "/api/bills/export", {"filters": {}}, cookie,
+                {"Referer": "http://evil.example/attack"})
+            # 对照:同一请求不带伪造头(非浏览器客户端)→ 必须仍 200
+            statuses["clean"] = self._session_post(
+                base, "/api/bills/export", {"filters": {}}, cookie, {})
+        finally:
+            # 自清理:关服务;失效 alice 登录产生的 auth:token:*/auth:user:*
+            # 令牌键 —— Redis 零残留,可背靠背重跑
+            server.shutdown()
+            server.server_close()
+            sessions.delete_by_user("alice")
+        protected = (statuses.get("forged_origin") == 403
+                     and statuses.get("forged_referer") == 403
+                     and statuses.get("clean") == 200)
+        return ProbeResult(
+            protected,
+            "伪造 Origin/Referer 的跨站 POST 均被 403 拒绝,不带伪造头的请求不受影响。" if protected
+            else f"CSRF 防线不完整:{statuses}。",
+            {"forged_origin_status": statuses.get("forged_origin"),
+             "forged_referer_status": statuses.get("forged_referer"),
+             "clean_request_status": statuses.get("clean"),
+             "target": "/api/bills/export"},
         )
 
 

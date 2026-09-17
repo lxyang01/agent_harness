@@ -4,9 +4,9 @@
 
 > 本分支(distributed)将 BillGuard 平移到无状态多实例部署:nginx + web×2 + PostgreSQL + Redis + 共享 MCP,一条命令起全集群。**永不合并回 main**;单进程零依赖版见 **main** 分支,两分支功能一致,差异在部署形态、并发原语与登录防护。
 
-BillGuard 是一个**框架无关的可审计 Agent Harness**:模型只能调用注册过的工具,不执行任意 SQL/Shell;金额与结论必须来自工具返回的真实数据;高风险写操作走三阶段审批(准备 → 人工批准 → 提交)。**24 条对抗探针**(零费用、确定性)验证提示注入、越权参数、伪造数字、跨用户数据窃取等攻击全部被拦截。业务载体是个人账单守卫:从账单与订阅 CSV 中发现涨价、重复扣费和大额离群,输出带证据的行动计划。
+BillGuard 是一个**框架无关的可审计 Agent Harness**:模型只能调用注册过的工具,不执行任意 SQL/Shell;金额与结论必须来自工具返回的真实数据;高风险写操作走三阶段审批(准备 → 人工批准 → 提交)。**25 条对抗探针**(零费用、确定性)验证提示注入、越权参数、伪造数字、跨用户数据窃取等攻击全部被拦截。业务载体是个人账单守卫:从账单与订阅 CSV 中发现涨价、重复扣费和大额离群,输出带证据的行动计划。
 
-本分支在集群形态下保留全部防线,并把并发防御重建在分布式原语上(Redis 会话锁、全集群 LLM 限额、PG 行锁审批恰好一次、Redis 登录失败计数),216 项单元测试与 24 条对抗探针在 PG/Redis 后端下全部通过(宿主机与集群内两端验证)。
+本分支在集群形态下保留全部防线,并把并发防御重建在分布式原语上(Redis 会话锁、全集群 LLM 限额、PG 行锁审批恰好一次、Redis 登录失败计数),248 项单元测试与 25 条对抗探针在 PG/Redis 后端下全部通过(宿主机与集群内两端验证)。
 
 ## 功能
 
@@ -14,7 +14,7 @@ BillGuard 是一个**框架无关的可审计 Agent Harness**:模型只能调用
 
 - **多实例无状态**:web-1 / web-2 任意实例可服务任意请求,kill 任一实例服务不中断,对话会话与登录态跨实例延续
 - **登录暴力破解防护**:按用户名+IP 失败计数,5 次锁定 10 分钟(Redis 计数;单进程模式为进程内计数),成功登录即清零;集群内经 nginx 的 X-Real-IP 识别客户端(nginx 强制覆写该头,web 端口不对外,不可伪造)
-- **全量验证**:216 项单元测试与 24 条对抗探针全部在 PG/Redis 后端下通过(宿主机与集群内两端验证)
+- **全量验证**:248 项单元测试与 25 条对抗探针全部在 PG/Redis 后端下通过(宿主机与集群内两端验证)
 - **一条命令拉起集群**:`docker compose up` 起 nginx + web×2 + PostgreSQL + Redis + 两个 MCP 服务
 
 ## 架构与技术
@@ -66,6 +66,7 @@ nginx :8080(ip_hash 负载均衡)
 | `BILLGUARD_REDIS_URL` | `redis://redis:6379/0` | Redis 地址 |
 | `BILLGUARD_BILL_MCP_URL` | `http://bill-server:8010/mcp` | 账单 MCP(streamable-http) |
 | `BILLGUARD_WORK_ITEM_MCP_URL` | `http://work-item-server:8020/mcp` | 工单 MCP(streamable-http) |
+| `BILLGUARD_SECURE_COOKIES` | —(缺省关闭) | 设为 `1`/`true` 时会话 Cookie 追加 `Secure` 属性(仅经 https 发送;https 部署建议开启,演示为 http 故缺省关闭) |
 | `API_KEY`(或 `OPENROUTER_API_KEY` / `OPENAI_API_KEY`) | `.env` / 宿主机透传 | 真实对话必填;**推荐写进仓库根目录 `.env`**(参照 `docker/.env.example`,compose 自动读取,已 gitignore)。全缺时 compose 注入占位值 `e2e-smoke-key`,容器可启动并完成基础设施冒烟,但不能真实调用模型 |
 | `BILLGUARD_LLM_MODEL` / `BILLGUARD_LLM_BASE_URL` | `openai/gpt-4.1-mini` / `https://openrouter.ai/api/v1` | 模型与端点(在 `.env` 里覆盖即可换模型;用 OpenAI 官方 Key 时端点改为 `https://api.openai.com/v1`) |
 
@@ -133,7 +134,7 @@ docker compose exec -T postgres pg_dump -U billguard billguard > backup.sql
 
 ```bash
 python -X utf8 -m unittest discover -s tests
-# 期望:Ran 228 tests ... OK
+# 期望:Ran 248 tests ... OK
 ```
 
 套件连的是**独立测试库 `billguard_test`**(`tests/conftest.py` 的 `ensure_test_database` 自动建库并应用全部迁移,幂等),与演示集群的 `billguard` 库物理隔离 —— 跑测试不再清空演示库的 users/账单数据。对抗评测(`python -m billguard.adversarial_eval`)缺省仍指向演示库 `billguard`(宿主机/集群内运行时如此,可用 `BILLGUARD_PG_DSN` 覆盖),会清空其夹具表;CI 里该步骤用 env 显式钉在 `billguard_test`(CI 的演示库是零表空壳)。
@@ -145,7 +146,7 @@ python -X utf8 -m unittest discover -s tests
 python -X utf8 -m billguard.adversarial_eval
 # 集群内(容器网络)
 docker compose exec web-1 python -m billguard.adversarial_eval
-# 期望:metrics "total": 24, "passed": 24, "failed": 0
+# 期望:metrics "total": 25, "passed": 25, "failed": 0
 ```
 
 评测为确定性本地探针(恶意脚本模型替身),不需要真实 Key;会清空业务表(users 仅删夹具 alice/mallory,不影响 admin),不要在存有真实数据的库上执行。
