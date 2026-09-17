@@ -49,10 +49,11 @@ services:
     # serve() 启动即连 MCP,慢启动曾致容器永久退出;unless-stopped 自动重启
     # (compose kill/stop 属手动停止,不受重启策略影响,冒烟 A3/B3 流程不变)
     restart: unless-stopped
-    # streamable-http 无公开健康路径,TCP 能连上即为存活
+    # /health 就绪路由(mcp_servers/bill_server.py custom_route):HTTP 200 才算
+    # 存活,取代仅证明 TCP 栈在线的 socket 探针
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import socket; socket.create_connection(('127.0.0.1', 8010), timeout=2).close()"]
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=3)"]
       interval: 5s
       retries: 10
       start_period: 10s
@@ -69,7 +70,7 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import socket; socket.create_connection(('127.0.0.1', 8020), timeout=2).close()"]
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/health', timeout=3)"]
       interval: 5s
       retries: 10
       start_period: 10s

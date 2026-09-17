@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
 from . import apply_streamable_bind
 
@@ -53,6 +55,11 @@ def build_server(data_dir: str | Path) -> FastMCP:
         json_response=True,
         stateless_http=True,
     )
+
+    @server.custom_route("/health", methods=["GET"])
+    async def health(_request: Request) -> Response:
+        """就绪探针(compose healthcheck):只确认进程与 HTTP 栈存活,不触存储。"""
+        return JSONResponse({"ok": True})
 
     @server.tool(name="list_issues", annotations=READ_ONLY, structured_output=True)
     def list_issues(status: Literal["open", "in_progress", "done"] | None = None,
