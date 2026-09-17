@@ -6,7 +6,7 @@
 
 BillGuard 是一个**框架无关的可审计 Agent Harness**:模型只能调用注册过的工具,不执行任意 SQL/Shell;金额与结论必须来自工具返回的真实数据;高风险写操作走三阶段审批(准备 → 人工批准 → 提交)。**25 条对抗探针**(零费用、确定性)验证提示注入、越权参数、伪造数字、跨用户数据窃取等攻击全部被拦截。业务载体是个人账单守卫:从账单与订阅 CSV 中发现涨价、重复扣费和大额离群,输出带证据的行动计划。
 
-本分支在集群形态下保留全部防线,并把并发防御重建在分布式原语上(Redis 会话锁、全集群 LLM 限额、PG 行锁审批恰好一次、Redis 登录失败计数),248 项单元测试与 25 条对抗探针在 PG/Redis 后端下全部通过(宿主机与集群内两端验证)。
+本分支在集群形态下保留全部防线,并把并发防御重建在分布式原语上(Redis 会话锁、全集群 LLM 限额、PG 行锁审批恰好一次、Redis 登录失败计数),278 项单元测试与 25 条对抗探针在 PG/Redis 后端下全部通过(宿主机与集群内两端验证)。
 
 ## 功能
 
@@ -14,7 +14,7 @@ BillGuard 是一个**框架无关的可审计 Agent Harness**:模型只能调用
 
 - **多实例无状态**:web-1 / web-2 任意实例可服务任意请求,kill 任一实例服务不中断,对话会话与登录态跨实例延续
 - **登录暴力破解防护**:按用户名+IP 失败计数,5 次锁定 10 分钟(Redis 计数;单进程模式为进程内计数),成功登录即清零;集群内经 nginx 的 X-Real-IP 识别客户端(nginx 强制覆写该头,web 端口不对外,不可伪造)
-- **全量验证**:248 项单元测试与 25 条对抗探针全部在 PG/Redis 后端下通过(宿主机与集群内两端验证)
+- **全量验证**:278 项单元测试与 25 条对抗探针全部在 PG/Redis 后端下通过(宿主机与集群内两端验证)
 - **一条命令拉起集群**:`docker compose up` 起 nginx + web×2 + PostgreSQL + Redis + 两个 MCP 服务
 
 ## 架构与技术
@@ -74,13 +74,12 @@ nginx :8080(ip_hash 负载均衡)
 
 ### 指标
 
-每个 web 实例内置**进程内轻量指标**(`billguard/metrics.py`,纯标准库,零新增依赖),经 `GET /api/metrics` 输出 JSON 快照:计数器(`http_requests_total`、`http_status_{code}`、`llm_calls/failures/retries_total`、`tool_calls/failures_total`、`mcp_calls_total`、`mcp_call_failures_total`、`circuit_opens_total`、`lock_conflicts_total`、`login_failures_total`、`login_throttle_blocks_total`、`approvals_decided_total`)、计时(`http/llm/mcp_call_seconds`,count+sum 可求均值)与仪表(`llm_slots_in_use`、`pg_pool_size`/`pg_pool_in_use`、`uptime_seconds`)。指标是**每实例独立**的(进程内计数,不聚合);`instance` 字段标识来源实例。
+每个 web 实例内置**进程内轻量指标**(`billguard/metrics.py`,纯标准库,零新增依赖),经 `GET /api/metrics` 输出 JSON 快照:计数器(`http_requests_total`、`http_status_{code}`、`llm_calls/failures/retries_total`、`tool_calls/failures_total`、`mcp_calls_total`、`mcp_call_failures_total`、`circuit_opens_total`、`lock_conflicts_total`、`login_failures_total`、`login_throttle_blocks_total`、`approvals_decided_total`)、计时(`http/llm/mcp_call_seconds`,count+sum 可求均值)与仪表(`llm_slots_in_use`、`pg_pool_size`/`pg_pool_in_use`、`uptime_seconds`)。指标是**每实例独立**的(进程内计数,不跨实例聚合;实例重启即清零);`instance` 字段标识来源实例。`http_*` 仅统计 JSON API 响应(静态文件与静态 404 不计)。
 
 鉴权:与其它 API 一致要求登录,但不设能力门槛——指标是运行操作数据而非敏感业务数据,任何登录用户可读(未登录 401,避免匿名探测)。本端点自身不计入 `http_request_seconds`(抓取间隔不反馈进时延统计),但状态计数照常记录。
 
 ```bash
 curl -s -b "session=<登录 Cookie>" http://localhost:8080/api/metrics | python -m json.tool
-# 集群内指定实例:docker compose exec web-1 curl -s -H "Cookie: ..." http://127.0.0.1:8000/api/metrics
 ```
 
 生产 Prometheus/OTel 路径:抓取该 JSON 转换为 Prometheus 文本暴露格式即可(如经 nginx 侧 exporter 定期抓取各实例并聚合),本分支不引入抓取库——做法详见 `docs/operations.md`。

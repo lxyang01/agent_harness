@@ -21,6 +21,7 @@ from tests.llm_doubles import FinalLLM
 from tests.conftest import StoreTestCase
 from billguard.auth import Authenticator
 from billguard.coordination import RedisAuthSessions, RedisLoginThrottle
+from billguard.metrics import METRICS
 from billguard.storage_pg import (
     PGBillService, PGEvidenceStore, PGSessionStore, PGTraceStore, PGUserStore,
 )
@@ -153,6 +154,7 @@ class HttpLoginThrottleTests(StoreTestCase):
                          {"username": username, "password": password})
 
     def test_locked_out_after_threshold_even_with_correct_password(self):
+        counters_before = METRICS.snapshot()["counters"]
         for index in range(3):
             status, _ = self.login("admin", f"wrong-pass-{index}")
             self.assertEqual(401, status)
@@ -160,6 +162,12 @@ class HttpLoginThrottleTests(StoreTestCase):
         status, data = self.login("admin", "admin-pass-1234")
         self.assertEqual(429, status)
         self.assertIn("登录失败次数过多", data["error"])
+        # 埋点:3 次失败登录 → login_failures;锁定期拒绝 → throttle_blocks
+        counters = METRICS.snapshot()["counters"]
+        self.assertEqual(counters_before.get("login_failures_total", 0) + 3,
+                         counters.get("login_failures_total", 0))
+        self.assertEqual(counters_before.get("login_throttle_blocks_total", 0) + 1,
+                         counters.get("login_throttle_blocks_total", 0))
         # 不同用户名是独立桶,不受牵连
         status, _ = self.login("user1", "user-pass-123")
         self.assertEqual(200, status)

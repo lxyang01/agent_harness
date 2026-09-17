@@ -5,6 +5,7 @@ from pathlib import Path
 
 from billguard.auth import AuthError, Authenticator, PermissionDenied, User
 from billguard.coordination import RedisAuthSessions
+from billguard.metrics import METRICS
 from billguard.policy import PolicyGateway
 from billguard.storage_pg import (
     PGApprovalStore, PGBillService, PGEvidenceStore, PGSessionStore,
@@ -173,14 +174,20 @@ class ServerSideIdentityTests(WebAuthTestCase):
 
         paused = app.chat(alice, "s-approve", "$monthly-guard-report create issue")
         self.assertEqual("approval_pending", paused["status"])
+        decided_before = METRICS.snapshot()["counters"].get("approvals_decided_total", 0)
         with self.assertRaises(PermissionDenied):  # viewer 无审批能力
             app.decide_approval(mallory, "s-approve",
                                 {"approval_id": paused["approval"]["id"], "decision": "approve"})
+        # 被拒的越权 decide 不计数;成功决策 +1
+        self.assertEqual(decided_before,
+                         METRICS.snapshot()["counters"].get("approvals_decided_total", 0))
         result = app.decide_approval(alice, "s-approve", {
             "approval_id": paused["approval"]["id"], "decision": "approve",
             "decided_by": "product-owner"})  # 伪造身份被忽略
         self.assertEqual("completed", result["status"])
         self.assertEqual("alice", result["approval"]["decided_by"])
+        self.assertEqual(decided_before + 1,
+                         METRICS.snapshot()["counters"].get("approvals_decided_total", 0))
         issue = work_items.list_issues()["items"][0]
         self.assertEqual("alice", issue["created_by"])
 
