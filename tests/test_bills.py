@@ -76,6 +76,26 @@ class OverviewCoverageTests(unittest.TestCase):
             self.assertIsNone(blank["data_from"])
             self.assertIsNone(blank["data_to"])
 
+    def test_overview_data_note_empty_db_vs_filtered_empty(self):
+        """空结果集必须带确定性说明:整库为空提示导入;仅筛选落空提示放宽条件。
+
+        None 日期锚点 + 明确 note 双保险,杜绝模型在空库时编造“2024年6月”类区间。"""
+        with tempfile.TemporaryDirectory() as temp:
+            # 空库:note 指向“库为空,先导入”
+            blank = BillService(Path(temp) / "fresh").overview()
+            self.assertEqual(0, blank["count"])
+            self.assertIn("账单库为空", blank["data_note"])
+            self.assertIn("导入", blank["data_note"])
+            # 有数据但筛选落空:note 指向筛选条件
+            service = BillService(Path(temp))
+            service.import_bills("demo.csv", demo_csv())
+            empty = service.overview(BillFilters(date_from="2026-09-01", date_to="2026-09-30"))
+            self.assertEqual(0, empty["count"])
+            self.assertIsNone(empty["data_from"])
+            self.assertIn("筛选条件", empty["data_note"])
+            # 非空结果集:不带提示
+            self.assertIsNone(service.overview()["data_note"])
+
 
 class SubscriptionTests(unittest.TestCase):
     def test_subscriptions_import_and_hike_detection(self):

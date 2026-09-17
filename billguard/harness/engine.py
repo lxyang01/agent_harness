@@ -48,6 +48,15 @@ class _ToolExecution:
 EventHook = Callable[[RunEvent], None]
 
 
+def _metric_inc(name: str) -> None:
+    """埋点专用计数:惰性导入 + 异常吞没,观测永不破坏工具执行路径。"""
+    try:
+        from ..metrics import METRICS
+        METRICS.inc(name)
+    except Exception:
+        return
+
+
 class HarnessEngine:
     """Controlled Agent loop with optional Skill routing and durable approval checkpoints."""
 
@@ -472,6 +481,7 @@ class HarnessEngine:
             "tool_start", trace_id, session_id, step,
             tool=tool_name, arguments=arguments,
         )
+        _metric_inc("tool_calls_total")  # 注册表层执行计数(本地与 MCP 工具同路径)
         tool_started = time.perf_counter()
         try:
             result: Any = self.tools.execute(tool_name, arguments, allowed=allowed_tools)
@@ -511,6 +521,8 @@ class HarnessEngine:
                 latency_ms=round((time.perf_counter() - tool_started) * 1000, 2),
             )
             execution = _ToolExecution(payload, False, str(exc))
+        if not execution.succeeded:
+            _metric_inc("tool_failures_total")
         self._append_tool_messages(
             session, working, tool_name, arguments, call_id,
             self._contextual_payload(payload, trace_id, step),

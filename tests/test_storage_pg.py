@@ -211,6 +211,24 @@ class OverviewCoverageTests(PGTestCase):
         # bob 无任何数据:全量 overview 也无覆盖区间
         self.assertIsNone(service.for_user("bob").overview()["data_from"])
 
+    def test_overview_data_note_empty_scope_vs_filtered_empty(self):
+        """空结果集必须带确定性说明(SQLite 版同构;“空”按 owner 视野判定)。"""
+        service = PGBillService(self.store_pool())
+        alice = service.for_user("alice")
+        alice.import_bills("demo.csv", demo_csv())
+        # 有数据但筛选落空:note 指向筛选条件
+        empty = alice.overview(BillFilters(date_from="2026-09-01", date_to="2026-09-30"))
+        self.assertEqual(0, empty["count"])
+        self.assertIsNone(empty["data_from"])
+        self.assertIn("筛选条件", empty["data_note"])
+        # bob 视野为空(库里另有 alice 数据):按 bob 的宇宙提示导入
+        blank = service.for_user("bob").overview()
+        self.assertEqual(0, blank["count"])
+        self.assertIn("账单库为空", blank["data_note"])
+        self.assertIn("导入", blank["data_note"])
+        # 非空结果集:不带提示
+        self.assertIsNone(alice.overview()["data_note"])
+
 
 class ApprovalStoreTests(PGTestCase):
     def test_concurrent_decide_exactly_one_winner(self):

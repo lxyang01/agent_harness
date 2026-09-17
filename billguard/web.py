@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import mimetypes
+import os
 import sys
 import threading
 import time
@@ -13,7 +14,7 @@ from dataclasses import replace
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from .agents import create_bill_agent, create_mcp_bill_agent
@@ -26,6 +27,7 @@ from .coordination import (LockedError, RedisAuthSessions, RedisLLMLimiter,
 from .guardrails import MAX_HTTP_REQUEST_BYTES, validate_user_input
 from .evaluation import EvaluationReportStore
 from .llm import OpenAICompatibleLLM
+from .metrics import METRICS
 from .mcp_runtime import MCPClientManager
 from .observability import TraceStore
 from .policy import ApprovalStore, PolicyError, PolicyGateway
@@ -162,6 +164,10 @@ class BoundedHTTPServer(ThreadingHTTPServer):
                 self._capacity.release()
 
     def _reject_busy(self, request) -> None:
+        # 满载 503 不经 handler._json,在此直接计数(server 无 app 句柄,
+        # 用模块级默认指标实例,与 handler 共享同一进程状态)
+        METRICS.inc("http_requests_total")
+        METRICS.inc("http_status_503")
         payload = json.dumps({"error": "服务繁忙,请稍后重试"}, ensure_ascii=False).encode("utf-8")
         header = (
             "HTTP/1.1 503 Service Unavailable" + CRLF
@@ -182,6 +188,25 @@ class BoundedHTTPServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         super().server_close()
         self._executor.shutdown(wait=False)
+
+
+def _pg_pool_gauges(pool: Any) -> Callable[[], dict[str, float]]:
+    """PG 连接池占用仪表的快照期 provider(psycopg_pool get_stats 字典)。
+
+    psycopg_pool 3.3 的 get_stats() 返回
+    {pool_min/pool_max/pool_size/pool_available/requests_waiting};
+    in_use = pool_size - pool_available。provider 在 metrics.snapshot 锁外
+    求值且异常被吞——池已关闭等边界只丢这一路仪表,不影响快照。"""
+    def provider() -> dict[str, float]:
+        stats = pool.get_stats() if hasattr(pool, "get_stats") else None
+        if not isinstance(stats, dict):
+            return {}
+        size = float(stats.get("pool_size", 0))
+        return {
+            "pg_pool_size": size,
+            "pg_pool_in_use": size - float(stats.get("pool_available", 0)),
+        }
+    return provider
 
 
 def _make_owner_wrapper(original: Any, owner: str, allowed: frozenset[str],
@@ -309,6 +334,7 @@ class BillGuardApp:
                 self._redis_client, session_id,
                 ttl_ms=int((self.run_timeout or 120) * 1000 + 60_000))
             if not lock.acquire():
+                METRICS.inc("lock_conflicts_total")  # 跨实例锁竞争(423 来源)
                 raise LockedError("另一会话操作正在进行,请稍后重试")
             return _RedisSessionGuard(lock)
         return self._lock(session_id)
@@ -316,6 +342,17 @@ class BillGuardApp:
     def _scoped(self, user: Any):
         """按用户装配的受限账单视图:查询自动过滤,写入自动盖 owner 戳。"""
         return self.bills.for_user(user.username)
+
+    def _acquire_llm_slot(self) -> bool:
+        """LLM 并发槽位获取;成功时同步维护 llm_slots_in_use 仪表。"""
+        if not self._llm_slots.acquire(blocking=False):
+            return False
+        METRICS.gauge_add("llm_slots_in_use", 1)
+        return True
+
+    def _release_llm_slot(self) -> None:
+        METRICS.gauge_add("llm_slots_in_use", -1)
+        self._llm_slots.release()
 
     def _require_session_access(self, user: Any, session_id: str) -> None:
         if not self._session_exists(session_id):
@@ -448,12 +485,12 @@ class BillGuardApp:
 
     def chat(self, user: Any, session_id: str, message: str) -> dict[str, Any]:
         validate_user_input(message)
-        if not self._llm_slots.acquire(blocking=False):
+        if not self._acquire_llm_slot():
             raise BusyError("服务繁忙,请稍后重试")
         try:
             return self._chat_locked(user, session_id, message)
         finally:
-            self._llm_slots.release()
+            self._release_llm_slot()
 
     def _chat_locked(self, user: Any, session_id: str, message: str) -> dict[str, Any]:
         with self._session_guard(session_id):
@@ -525,13 +562,15 @@ class BillGuardApp:
         decision = str(body.get("decision", "")).strip().lower()
         if not approval_id or decision not in {"approve", "reject"}:
             raise PolicyError("approval_id 与 decision(approve 或 reject)不能为空")
-        if not self._llm_slots.acquire(blocking=False):
+        if not self._acquire_llm_slot():
             raise BusyError("服务繁忙,请稍后重试")
         try:
-            return self._decide_approval_locked(
+            result = self._decide_approval_locked(
                 user, session_id, approval_id, decision, str(body.get("note", "")))
         finally:
-            self._llm_slots.release()
+            self._release_llm_slot()
+        METRICS.inc("approvals_decided_total")  # 决策成功落库(approve/reject 各一)
+        return result
 
     def _decide_approval_locked(self, user: Any, session_id: str,
                                 approval_id: str, decision: str, note: str) -> dict[str, Any]:
@@ -879,6 +918,10 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
             print(f"[web] {self.address_string()} - {fmt % args}")
 
         def _json(self, status: int, value: Any, set_cookie: str | None = None) -> None:
+            # 全部 JSON 响应的单一计数点(含 /api/metrics 自身——它是真实响应);
+            # 时延计时在 do_GET/do_POST 包装层,/api/metrics 例外不计时
+            METRICS.inc("http_requests_total")
+            METRICS.inc(f"http_status_{status}")
             payload = json.dumps(value, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -916,6 +959,34 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(payload)
 
         def do_GET(self) -> None:
+            if urlparse(self.path).path == "/api/metrics":
+                self._serve_metrics()  # 不计时:抓取间隔不得反馈进时延统计
+                return
+            started = time.perf_counter()
+            try:
+                self._do_get_dispatch()
+            finally:
+                METRICS.observe("http_request_seconds",
+                                time.perf_counter() - started)
+
+        def _serve_metrics(self) -> None:
+            """GET /api/metrics:本实例进程内指标快照(billguard/metrics.py)。
+
+            鉴权决策:与其它 API 一致要求登录(resolve_user),但不设能力门槛
+            ——指标是运行操作数据而非敏感业务数据,任何登录用户可读;未登录
+            抓取一律 401(避免匿名探测实例内部状态)。本端点不计时,但 _json
+            的状态计数照常记录(含本端点自身的 200/401)。"""
+            try:
+                app.authenticator.resolve_user(self.headers)
+            except AuthError as exc:
+                self._json(401, {"error": str(exc)})
+                return
+            body = {"instance": METRICS.instance_label or f"pid:{os.getpid()}",
+                    **METRICS.snapshot()}
+            body["note"] = "生产环境可将此 JSON 转换为 Prometheus 文本格式抓取(见 docs/operations.md)"
+            self._json(200, body)
+
+        def _do_get_dispatch(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path == "/api/health":
                 self._json(200, {"ok": True})
@@ -940,6 +1011,14 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
             self._static(parsed.path)
 
         def do_POST(self) -> None:
+            started = time.perf_counter()
+            try:
+                self._do_post_dispatch()
+            finally:
+                METRICS.observe("http_request_seconds",
+                                time.perf_counter() - started)
+
+        def _do_post_dispatch(self) -> None:
             try:
                 if self.path in _AUTH_EXEMPT_POST:
                     body = self._body()
@@ -960,6 +1039,7 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
                     # 直连路径。本地开发无代理 → 用套接字对端地址。
                     ip = self.headers.get("X-Real-IP") or self.client_address[0]
                     if throttle is not None and not throttle.allowed(username, ip):
+                        METRICS.inc("login_throttle_blocks_total")
                         self._json(429, {"error": "登录失败次数过多,请稍后再试"})
                         return
                     try:
@@ -967,6 +1047,7 @@ def make_handler(app: BillGuardApp) -> type[BaseHTTPRequestHandler]:
                     except AuthError as exc:
                         if throttle is not None:
                             throttle.record_failure(username, ip)
+                            METRICS.inc("login_failures_total")
                         self._json(401, {"error": str(exc)})
                         return
                     if throttle is not None:
@@ -1110,6 +1191,8 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
                   + ",并确保对应 MCP 服务器已以 --transport streamable-http 启动。")
             raise SystemExit(1)
         pool = new_pg_pool(pg_dsn)
+        # 指标仪表:PG 连接池占用(快照期惰性求值;单进程模式无池,不注册)
+        METRICS.register_provider("pg_pool", _pg_pool_gauges(pool))
         # 启动门禁:库落后于 migrations/ 时拒绝启动;BILLGUARD_AUTO_MIGRATE=1
         # 则先自动补齐(compose 的 web_env 锚点已注入该变量,新卷自迁移)
         from .migrate import require_current
@@ -1175,6 +1258,8 @@ def serve(host: str = "127.0.0.1", port: int = 8000, data_dir: str = ".sessions"
         )),
         max_threads=max_threads, queue_capacity=queue_capacity,
     )
+    # /api/metrics 的实例标识(测试/直构场景缺省回退 pid:<pid>)
+    METRICS.instance_label = f"{host}:{server.server_port}"
     print(f"BillGuard Web UI: http://{host}:{server.server_port}")
     print("Press Ctrl+C to stop.")
     try:

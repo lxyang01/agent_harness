@@ -72,6 +72,19 @@ nginx :8080(ip_hash 负载均衡)
 
 > 注:spec §5.1 所列环境变量 `BILLGUARD_MAX_CONCURRENT_LLM` 未实现;集群 LLM 并发上限经 `--max-concurrent-llm` 参数传入(默认 4,与 spec §5.1 默认一致)。
 
+### 指标
+
+每个 web 实例内置**进程内轻量指标**(`billguard/metrics.py`,纯标准库,零新增依赖),经 `GET /api/metrics` 输出 JSON 快照:计数器(`http_requests_total`、`http_status_{code}`、`llm_calls/failures/retries_total`、`tool_calls/failures_total`、`mcp_calls_total`、`mcp_call_failures_total`、`circuit_opens_total`、`lock_conflicts_total`、`login_failures_total`、`login_throttle_blocks_total`、`approvals_decided_total`)、计时(`http/llm/mcp_call_seconds`,count+sum 可求均值)与仪表(`llm_slots_in_use`、`pg_pool_size`/`pg_pool_in_use`、`uptime_seconds`)。指标是**每实例独立**的(进程内计数,不聚合);`instance` 字段标识来源实例。
+
+鉴权:与其它 API 一致要求登录,但不设能力门槛——指标是运行操作数据而非敏感业务数据,任何登录用户可读(未登录 401,避免匿名探测)。本端点自身不计入 `http_request_seconds`(抓取间隔不反馈进时延统计),但状态计数照常记录。
+
+```bash
+curl -s -b "session=<登录 Cookie>" http://localhost:8080/api/metrics | python -m json.tool
+# 集群内指定实例:docker compose exec web-1 curl -s -H "Cookie: ..." http://127.0.0.1:8000/api/metrics
+```
+
+生产 Prometheus/OTel 路径:抓取该 JSON 转换为 Prometheus 文本暴露格式即可(如经 nginx 侧 exporter 定期抓取各实例并聚合),本分支不引入抓取库——做法详见 `docs/operations.md`。
+
 ### 设计决策
 
 - **为什么 423 而不是排队**:分布式锁不加等待队列——跨实例的等待队列要处理排队者生命周期(实例死亡时的清理、公平性、超时传递),复杂度与收益不成比例。立即 423 让客户端显式重试,语义简单可预测;锁 TTL(run_timeout + 60s)兜底实例崩溃,不会永久占锁。
@@ -134,7 +147,7 @@ docker compose exec -T postgres pg_dump -U billguard billguard > backup.sql
 
 ```bash
 python -X utf8 -m unittest discover -s tests
-# 期望:Ran 248 tests ... OK
+# 期望:Ran 278 tests ... OK
 ```
 
 套件连的是**独立测试库 `billguard_test`**(`tests/conftest.py` 的 `ensure_test_database` 自动建库并应用全部迁移,幂等),与演示集群的 `billguard` 库物理隔离 —— 跑测试不再清空演示库的 users/账单数据。对抗评测(`python -m billguard.adversarial_eval`)缺省仍指向演示库 `billguard`(宿主机/集群内运行时如此,可用 `BILLGUARD_PG_DSN` 覆盖),会清空其夹具表;CI 里该步骤用 env 显式钉在 `billguard_test`(CI 的演示库是零表空壳)。

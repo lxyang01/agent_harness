@@ -497,6 +497,16 @@ class BillService:
                 "methods": [item[0] for item in db.execute(
                     f"SELECT DISTINCT method FROM transactions{owner_where} ORDER BY method", owner_params)],
             }
+            # 空结果集的确定性说明:整个(该 owner 视野内的)数据集为空 → 提示
+            # 先导入;仅筛选后为空 → 提示放宽条件。与 None 日期锚点双保险,
+            # 杜绝模型在空库时编造“2024年6月”类时间区间。
+            data_note = None
+            if row["count"] == 0:
+                unfiltered = db.execute(
+                    f"SELECT COUNT(*) FROM transactions{owner_where}",
+                    owner_params).fetchone()[0]
+                data_note = ("账单库为空(无任何交易记录),请先导入 CSV" if unfiltered == 0
+                             else "当前筛选条件下无交易记录")
         active_days = row["active_days"]
         return {
             "total_amount": round(row["total_amount"], 2),
@@ -507,6 +517,7 @@ class BillService:
             # 给模型一个日期锚点,避免它在“本月无支出”类回答里编造年份/区间
             "data_from": row["data_from"],
             "data_to": row["data_to"],
+            "data_note": data_note,
             "by_category": by_category,
             "top_merchants": top_merchants,
             "max_tx": dict(max_tx) if max_tx else None,

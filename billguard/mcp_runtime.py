@@ -29,6 +29,17 @@ T = TypeVar("T")
 AuditHook = Callable[[str, dict[str, Any]], None]
 
 
+def _metrics() -> Any:
+    """全局指标实例(billguard.metrics.METRICS);取不到时返回 None。
+
+    惰性导入 + 异常吞没:与 llm.py 同构,埋点永不破坏 MCP 调用路径。"""
+    try:
+        from .metrics import METRICS
+        return METRICS
+    except Exception:
+        return None
+
+
 class MCPError(RuntimeError):
     """Raised when an MCP transport, protocol, or remote tool operation fails."""
 
@@ -232,13 +243,24 @@ class MCPClientManager:
 
     def call_tool(self, server_name: str, tool_name: str,
                   arguments: dict[str, Any] | None = None) -> Any:
+        # 埋点:calls/seconds 在 finally 记(成败都算),失败额外计 failures;
+        # 注册表层的工具成败(tool_calls/tool_failures)由 HarnessEngine 记,
+        # 不在此重复(MCP 工具都经注册表-引擎路径执行)
         self._audit("mcp_tool_start", server=server_name, tool=tool_name,
                     arguments=arguments or {})
+        metrics = _metrics()
+        started = time.perf_counter()
         try:
             result = self._guarded_call(server_name, tool_name, arguments or {})
         except Exception as exc:
+            if metrics is not None:
+                metrics.inc("mcp_call_failures_total")
             self._audit("mcp_tool_error", server=server_name, tool=tool_name, error=str(exc))
             raise
+        finally:
+            if metrics is not None:
+                metrics.inc("mcp_calls_total")
+                metrics.observe("mcp_call_seconds", time.perf_counter() - started)
         self._audit("mcp_tool_end", server=server_name, tool=tool_name, result=result)
         return result
 
@@ -365,6 +387,9 @@ class MCPClientManager:
             circuit.recovering = False
         self._audit("mcp_circuit_open", server=server,
                     cooldown=self.circuit_cooldown, error=str(error))
+        metrics = _metrics()
+        if metrics is not None:
+            metrics.inc("circuit_opens_total")
 
     def _mark_recovered(self, server: str) -> None:
         """恢复 → CLOSED(半开探测成功或重连成功后)。"""

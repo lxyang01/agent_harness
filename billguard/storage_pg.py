@@ -505,6 +505,15 @@ class PGBillService(_PooledStore, BillService):
                 "methods": [row["method"] for row in db.execute(
                     f"SELECT DISTINCT method FROM transactions{owner_where} ORDER BY method", owner_params)],
             }
+            # 空结果集的确定性说明(与 SQLite 版同构):按 owner 视野判定整集
+            # 是否为空——空则提示导入,非空仅筛选落空则提示放宽条件
+            data_note = None
+            if row["count"] == 0:
+                unfiltered = db.execute(
+                    f"SELECT COUNT(*) AS count FROM transactions{owner_where}",
+                    owner_params).fetchone()["count"]
+                data_note = ("账单库为空(无任何交易记录),请先导入 CSV" if unfiltered == 0
+                             else "当前筛选条件下无交易记录")
         total_amount = float(row["total_amount"])
         active_days = row["active_days"]
         return {
@@ -516,6 +525,7 @@ class PGBillService(_PooledStore, BillService):
             # 给模型一个日期锚点,避免它在“本月无支出”类回答里编造年份/区间
             "data_from": row["data_from"],
             "data_to": row["data_to"],
+            "data_note": data_note,
             "by_category": by_category,
             "top_merchants": top_merchants,
             "max_tx": ({**max_tx, "amount": float(max_tx["amount"])} if max_tx else None),
