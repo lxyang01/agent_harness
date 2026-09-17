@@ -91,6 +91,15 @@ curl -s -b "session=<登录 Cookie>" http://localhost:8080/api/metrics | python 
 - **审批 SQL 为何一字不改**:恰好一次语义由"条件 UPDATE + rowcount==0 即拒绝"表达,与存储引擎无关;SQLite→PG 只换占位符,PG 行锁天然串行化并发 decide。不动这条 SQL,意味着"并发审批双提交"对抗探针验证的就是同一份逻辑,行为可证等价。
 - **ip_hash 的作用**:同一客户端 IP 固定路由到同一 web 实例,减少 Redis 锁竞争与 423 概率;非必需——正确性只依赖 Redis/PG 的互斥,轮询负载均衡同样正确。
 
+### 生产化文档
+
+安全、数据、并发与运维四个维度各有一篇「现状 + 生产方向」文档(均描述实际行为,逐条可对照源码核验):
+
+- [docs/security-baseline.md](docs/security-baseline.md) — 安全基线:认证与会话、登录节流、CSRF、TLS 终止、密钥管理、审计面、已知边界
+- [docs/data-governance.md](docs/data-governance.md) — 数据治理:数据清单、PII 边界、Trace/Evidence 内容、删除语义、备份加密与保留期
+- [docs/concurrency-guarantees.md](docs/concurrency-guarantees.md) — 并发保证与边界:四层防御、锁租约讨论、双主窗口、幂等现状、MCP 熔断并发正确性
+- [docs/operations.md](docs/operations.md) — 运维手册:发布顺序、备份恢复与演练、Redis 持久化权衡、容量规划、监控告警、密钥轮换、故障排查速查
+
 ## 启动与命令
 
 以下命令均在仓库根目录执行;集群冒烟验收的完整步骤见 `docker/cluster-smoke.md`。

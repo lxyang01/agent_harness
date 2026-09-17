@@ -7,6 +7,13 @@ __pycache__/
 .mcp-test-deps/
 *.egg-info/
 .superpowers/
-docs/
+# docs/ 曾整体忽略(superpowers 草稿区)。gitignore 无法重新包含"被排除目录
+# 内部"的文件,因此不能用 `docs/` 整目录忽略,改用 `docs/*` 逐内容忽略再
+# `!` 反选四篇入库文档;草稿(docs/superpowers/ 与其余历史文件)保持忽略。
+docs/*
+!docs/security-baseline.md
+!docs/data-governance.md
+!docs/concurrency-guarantees.md
+!docs/operations.md
 .env
 bills.db*
