@@ -844,6 +844,9 @@ def _same_origin(headers: Any) -> bool:
         return True  # 非浏览器客户端:无跨站附带 Cookie 的攻击面
     source = origin or referer  # Origin 优先;并存时 Referer 可能被裁剪,不可信
     host = str(headers.get("Host") or "").strip().lower()
+    # 比较不含 scheme:http/https 同 netloc 视为同源(TLS 终止部署下 Origin 为
+    # https 而内网请求无 scheme,仍可判定);若未来两种 scheme 并存对外服务,
+    # 需收紧为含 scheme 比较。
     return bool(host) and urlparse(str(source)).netloc.strip().lower() == host
 
 

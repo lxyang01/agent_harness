@@ -63,16 +63,30 @@ curl -s -c /tmp/bg-cookie -H 'Content-Type: application/json' \
   http://127.0.0.1:8080/api/auth/login
 # 期望:{"username": "admin", "role": "admin"}
 
-# 2) 持有会话 smoke-lock-423 的 Redis 锁(宿主机直连 6380)
+# 2) 同源校验经 nginx 入口(浏览器形态:同源 Origin 放行、伪造 Origin 拒绝)
+curl -s -o /dev/null -w 'same-origin: %{http_code}\n' -X POST \
+  -H 'Content-Type: application/json' -H 'Origin: http://127.0.0.1:8080' \
+  -d '{"username":"admin","password":"Smoke-Admin-1"}' \
+  http://127.0.0.1:8080/api/auth/login
+# 期望:same-origin: 200 —— 同时证明 nginx 以 $http_host 原样透传 Host(含端口)。
+# 「旧 nginx($host 丢端口)+ 新 web」的部分滚动会让此处变 403,冒烟当场失败,
+# 而不是等到浏览器全部 POST 被拒才发现
+curl -s -w '\nforged: %{http_code}\n' -X POST \
+  -H 'Content-Type: application/json' -H 'Origin: http://evil.example' \
+  -d '{"username":"admin","password":"Smoke-Admin-1"}' \
+  http://127.0.0.1:8080/api/auth/login
+# 期望:forged: 403,{"error": "跨站请求被拒绝"}(403 在节流与验密之前,不计数)
+
+# 3) 持有会话 smoke-lock-423 的 Redis 锁(宿主机直连 6380)
 python -X utf8 -c "import redis,hashlib; c=redis.Redis.from_url('redis://127.0.0.1:6380/0'); k='lock:session:'+hashlib.sha256('smoke-lock-423'.encode()).hexdigest(); print('held' if c.set(k,'smoke-holder',nx=True,px=120000) else 'already-held')"
 
-# 3) 该会话发起对话 → 期望 HTTP 423 + 中文错误
+# 4) 该会话发起对话 → 期望 HTTP 423 + 中文错误
 curl -s -b /tmp/bg-cookie -H 'Content-Type: application/json' \
   -d '{"session_id":"smoke-lock-423","message":"冒烟测试"}' \
   -w '\nHTTP %{http_code}\n' http://127.0.0.1:8080/api/chat
 # 期望:HTTP 423,{"error": "另一会话操作正在进行,请稍后重试"}
 
-# 4) 释放锁后再发一次 → 不再是 423
+# 5) 释放锁后再发一次 → 不再是 423
 python -X utf8 -c "import redis,hashlib; c=redis.Redis.from_url('redis://127.0.0.1:6380/0'); c.delete('lock:session:'+hashlib.sha256('smoke-lock-423'.encode()).hexdigest())"
 curl -s -b /tmp/bg-cookie -H 'Content-Type: application/json' \
   -d '{"session_id":"smoke-lock-423","message":"冒烟测试"}' \
@@ -202,6 +216,10 @@ docker compose up -d postgres redis   # 恢复宿主机测试依赖
 - 占位 Key(`e2e-smoke-key`)下一切对话类接口无法完成真实模型调用(实测
   HTTP 200 + status="failed",answer 为模型错误信息;也可能 5xx),属预期;
   A1–A4 不受影响。
+- **web 与 nginx 必须一起滚动**:`docker compose up --build -d` 整批重建。
+  新 web 的同源校验依赖 nginx 以 `$http_host` 原样透传 Host(含端口);旧
+  nginx 的 `$host` 会丢端口,部分滚动(只换 web 不换 nginx)会让全部合法
+  浏览器 POST(含登录)被 403 误拒 —— A2 第 2 步专门拦截这种部分滚动。
 - **web 容器重建后需重启 nginx**:web-1/web-2 被重建(`up --build`/`down` 后
   `up`)会拿到新容器 IP,而 nginx.conf 的静态 upstream(`server web-1:8001`)
   只在 nginx 启动时解析一次,之后仍指向旧 IP → 502 Bad Gateway。A0 的恢复
