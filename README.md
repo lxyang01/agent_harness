@@ -141,7 +141,25 @@ web-1/web-2 被**重建**(`up --build` 或 `down` 后再 `up`)会拿到新容器
 docker compose exec -T postgres pg_dump -U billguard billguard > backup.sql
 ```
 
-容量:每个 web 实例 PG 连接池 min 2 / max 8,默认部署 2 实例 = 最多 16 连接(PG 默认上限 100);水平扩实例时按此换算连接占用量。
+容量:每个 web 实例 PG 连接池 min 2 / max 8,默认部署 2 实例 = 最多 16 连接(PG 默认上限 100);水平扩实例时按此换算连接占用量。实测吞吐(`docker/loadtest.py`,纯标准库单进程压测端,数字为下界):
+
+| 端点 | 并发 | RPS | p95 | 备注 |
+| --- | --- | --- | --- | --- |
+| `GET /api/health` | 4 | 477 | 23.6 ms | 10 秒 4773 个请求全 200 |
+| `GET /api/health` | 16 | 644 | 30.2 ms | 10 秒 6671 个请求全 200 |
+| `GET /api/health` | 64 | 606 | 1031.4 ms | 仍 0 个 503,但尾部延迟抬升(见下) |
+| `POST /api/snapshot` | 4 | 40 | 135.5 ms | 每请求真实查询 PG |
+| `POST /api/snapshot` | 16 | 30 | 611.9 ms | 超出单实例 PG 池(max 8)即排队,延迟抬升 |
+| `POST /api/snapshot` | 64 | 253 | 1781.5 ms | 1926 个请求中 1710 个 503 —— 503 起点,见下 |
+
+实测于本机演示环境(Docker Desktop,单客户端经 nginx ip_hash 命中单实例),数字随环境变化。**503 起点 = 单实例 16 线程 + 32 排队上限的印证,不是集群整体容量**(集群容量 = 实例数 × 48):snapshot 是 POST,nginx 不对非幂等请求跨实例重试,并发 64 > 单实例上限 48 时溢出请求直接 503;health 是 GET,单实例满载的 503 会被 nginx `proxy_next_upstream` 转投另一空闲实例重试吸收(并发 64/128 实测均 0 个 503,代价是 p95 抬升到约 1 秒)。
+
+复现(Git Bash 下 `--path` 需写 `//api/...` 以避开 MSYS 路径改写,脚本已兼容三种 shell;勿压 `/api/chat`——真实模型调用按量计费):
+
+```bash
+python -X utf8 docker/loadtest.py --path //api/health
+python -X utf8 docker/loadtest.py --path //api/snapshot --method POST --login admin:Smoke-Admin-1
+```
 
 表结构演化走版本化迁移(`migrations/` 目录,`billguard/migrate.py` 手写 runner,无第三方迁移框架依赖):
 

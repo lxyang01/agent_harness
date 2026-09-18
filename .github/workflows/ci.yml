@@ -89,8 +89,13 @@ jobs:
           assert tables == 13, f"expected 13 tables, got {tables}"
           EOF
 
-      - name: Unit tests (expect 248 OK)
-        run: python -X utf8 -m unittest discover -s tests
+      # 输出 tee 成文件供 README 校验步骤提取计数,避免重跑 2.5 分钟套件;
+      # unittest 结果写 stderr,需 2>&1 合并;pipefail 让测试失败仍直接判失败
+      - name: Unit tests
+        run: |
+          set -o pipefail
+          python -X utf8 -m unittest discover -s tests 2>&1 \
+            | tee "$RUNNER_TEMP/unittest.log"
 
       # adversarial_eval 的 main() 无论探针成败都以 0 退出,
       # 故打印 metrics 后用 grep 校验 "failed": 0(期望 25/25);
@@ -108,3 +113,16 @@ jobs:
             | tee "$RUNNER_TEMP/adv-metrics.json"
           grep -q '"failed": 0' "$RUNNER_TEMP/adv-metrics.json"
           echo "adversarial metrics verified: failed = 0"
+
+      # 数字不手写:单元测试数取自上面 tee 的 unittest.log,探针数解析评测
+      # JSON 的 metrics.total —— 不能 grep '"total"':categories 里每个分类
+      # 也有自己的 total 且值不同,必须按 JSON 结构取
+      - name: README numbers match reality
+        run: |
+          tests=$(grep -oE 'Ran [0-9]+ tests' "$RUNNER_TEMP/unittest.log" \
+            | grep -oE '[0-9]+' | head -1)
+          probes=$(python -c "import json; d = json.load(\
+            open('$RUNNER_TEMP/adv-metrics.json')); print(d['metrics']['total'])")
+          test -n "$tests" || { echo "未能在 unittest.log 中找到 Ran N tests"; exit 1; }
+          test -n "$probes" || { echo "未能从 adv-metrics.json 解析 metrics.total"; exit 1; }
+          python tools/check_readme_numbers.py --tests "$tests" --probes "$probes"
