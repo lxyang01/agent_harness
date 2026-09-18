@@ -119,10 +119,11 @@ jobs:
       # 也有自己的 total 且值不同,必须按 JSON 结构取
       - name: README numbers match reality
         run: |
+          # || true 让提取失败落进下方 test -n 的中文报错,而非被 pipefail 静默终止
           tests=$(grep -oE 'Ran [0-9]+ tests' "$RUNNER_TEMP/unittest.log" \
-            | grep -oE '[0-9]+' | head -1)
+            | grep -oE '[0-9]+' | head -1) || true
           probes=$(python -c "import json; d = json.load(\
-            open('$RUNNER_TEMP/adv-metrics.json')); print(d['metrics']['total'])")
+            open('$RUNNER_TEMP/adv-metrics.json')); print(d['metrics']['total'])") || true
           test -n "$tests" || { echo "未能在 unittest.log 中找到 Ran N tests"; exit 1; }
           test -n "$probes" || { echo "未能从 adv-metrics.json 解析 metrics.total"; exit 1; }
           python tools/check_readme_numbers.py --tests "$tests" --probes "$probes"

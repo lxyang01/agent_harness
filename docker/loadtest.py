@@ -37,7 +37,8 @@ REQUEST_TIMEOUT = 10.0  # 单请求超时:防止个别挂死请求拖长压测�
 def login(url: str, credentials: str) -> str:
     """登录一次,返回可复用的 Cookie 请求头值(如 "session=<token>")。
 
-    登录接口要求同源:POST 必须携带与 Host 一致的 Origin 头(见 web 层 CSRF 校验)。
+    登录接口带同源 Origin 头:模拟浏览器真实行为(见 web 层 CSRF 校验;当前
+    校验只拒绝头存在但不同源的请求,Origin/Referer 皆缺时会放行)。
     """
     parsed = urllib.parse.urlsplit(url)
     username, sep, password = credentials.partition(":")
