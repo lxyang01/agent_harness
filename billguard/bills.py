@@ -468,7 +468,9 @@ class BillService:
         with self._connect() as db:
             row = db.execute(
                 f"""SELECT COALESCE(SUM(amount), 0) AS total_amount, COUNT(*) AS count,
-                    COUNT(DISTINCT substr(paid_at, 1, 10)) AS active_days FROM transactions t{where}""",
+                    COUNT(DISTINCT substr(paid_at, 1, 10)) AS active_days,
+                    MIN(substr(paid_at, 1, 10)) AS data_from, MAX(substr(paid_at, 1, 10)) AS data_to
+                    FROM transactions t{where}""",
                 params).fetchone()
             pending = db.execute(
                 f"SELECT COUNT(*) FROM transactions t{where}{' AND' if where else ' WHERE'} t.status IN ('待核查','核查中')",
@@ -495,12 +497,27 @@ class BillService:
                 "methods": [item[0] for item in db.execute(
                     f"SELECT DISTINCT method FROM transactions{owner_where} ORDER BY method", owner_params)],
             }
+            # 空结果集的确定性说明:整个(该 owner 视野内的)数据集为空 → 提示
+            # 先导入;仅筛选后为空 → 提示放宽条件。与 None 日期锚点双保险,
+            # 杜绝模型在空库时编造“2024年6月”类时间区间。
+            data_note = None
+            if row["count"] == 0:
+                unfiltered = db.execute(
+                    f"SELECT COUNT(*) FROM transactions{owner_where}",
+                    owner_params).fetchone()[0]
+                data_note = ("账单库为空(无任何交易记录),请先导入 CSV" if unfiltered == 0
+                             else "当前筛选条件下无交易记录")
         active_days = row["active_days"]
         return {
             "total_amount": round(row["total_amount"], 2),
             "count": row["count"],
             "pending": pending,
             "avg_daily": round(row["total_amount"] / active_days, 2) if active_days else 0.0,
+            # 数据覆盖区间(min/max paid_at 的日期前缀):空结果集时为 None,
+            # 给模型一个日期锚点,避免它在“本月无支出”类回答里编造年份/区间
+            "data_from": row["data_from"],
+            "data_to": row["data_to"],
+            "data_note": data_note,
             "by_category": by_category,
             "top_merchants": top_merchants,
             "max_tx": dict(max_tx) if max_tx else None,

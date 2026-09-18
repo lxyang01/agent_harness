@@ -1,0 +1,129 @@
+# CI:distributed 分支全量验证 —— 单元测试(测试库 billguard_test)+ 25 条对抗探针,
+# 跑在真实 PostgreSQL / Redis 服务容器上(与宿主机 compose 相同端口 5433/6380)。
+# 徽章:https://github.com/lxyang01/agent_harness/actions/workflows/ci.yml/badge.svg?branch=distributed
+name: CI
+
+on:
+  push:
+    branches: [distributed]
+  pull_request:
+    branches: [distributed]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: billguard
+          POSTGRES_PASSWORD: billguard
+          POSTGRES_DB: billguard
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U billguard"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      # 服务容器健康探测通过后仍需一小段时间完成角色初始化,保守重试 ≤30s
+      - name: Wait for services (PG 5433 / Redis 6380)
+        run: |
+          python -X utf8 - <<'EOF'
+          import time
+          import psycopg, redis
+          for attempt in range(31):
+              try:
+                  psycopg.connect(
+                      "postgresql://billguard:billguard@127.0.0.1:5433/billguard",
+                      connect_timeout=2).close()
+                  assert redis.Redis.from_url(
+                      "redis://127.0.0.1:6380/0").ping()
+                  print("services ready")
+                  break
+              except Exception as exc:
+                  print(f"waiting for services ({attempt}): {exc}")
+                  time.sleep(1)
+          else:
+              raise SystemExit("PG/Redis not reachable after 30s")
+          EOF
+
+      # 表结构改由 migrations/ 管理:用 migrate runner 的 ensure-database 引导
+      # 独立测试库 billguard_test(不存在则建 + 应用全部迁移,幂等),单元测试
+      # 全部连该库 —— 与 adversarial_eval 缺省的演示库 billguard 物理分离
+      - name: Bootstrap test database (migrations)
+        run: |
+          python -m billguard.migrate --dsn postgresql://billguard:billguard@127.0.0.1:5433/billguard_test ensure-database
+          python -X utf8 - <<'EOF'
+          import psycopg
+          with psycopg.connect(
+                  "postgresql://billguard:billguard@127.0.0.1:5433/billguard_test") as conn:
+              tables = conn.execute(
+                  "SELECT count(*) FROM pg_tables WHERE schemaname='public'"
+                  " AND tablename <> 'schema_migrations'"
+              ).fetchone()[0]
+          print(f"billguard_test: {tables} business tables in public schema")
+          assert tables == 13, f"expected 13 tables, got {tables}"
+          EOF
+
+      # 输出 tee 成文件供 README 校验步骤提取计数,避免重跑 2.5 分钟套件;
+      # unittest 结果写 stderr,需 2>&1 合并;pipefail 让测试失败仍直接判失败
+      - name: Unit tests
+        run: |
+          set -o pipefail
+          python -X utf8 -m unittest discover -s tests 2>&1 \
+            | tee "$RUNNER_TEMP/unittest.log"
+
+      # adversarial_eval 的 main() 无论探针成败都以 0 退出,
+      # 故打印 metrics 后用 grep 校验 "failed": 0(期望 25/25);
+      # pipefail 让 python 自身崩溃也直接判失败,不依赖 grep 兜底。
+      # DSN 必须钉在 billguard_test:评测缺省指向演示库 billguard,而 CI 的
+      # 演示库只有 POSTGRES_DB 建出的空壳(init.sql 步骤已删,零张表),
+      # 不覆写会直接 UndefinedTable
+      - name: Adversarial evaluation (expect 25/25)
+        env:
+          BILLGUARD_PG_DSN: postgresql://billguard:billguard@127.0.0.1:5433/billguard_test
+        run: |
+          set -o pipefail
+          python -X utf8 -m billguard.adversarial_eval \
+            --output-dir "$RUNNER_TEMP/adv-eval" --report "" \
+            | tee "$RUNNER_TEMP/adv-metrics.json"
+          grep -q '"failed": 0' "$RUNNER_TEMP/adv-metrics.json"
+          echo "adversarial metrics verified: failed = 0"
+
+      # 数字不手写:单元测试数取自上面 tee 的 unittest.log,探针数解析评测
+      # JSON 的 metrics.total —— 不能 grep '"total"':categories 里每个分类
+      # 也有自己的 total 且值不同,必须按 JSON 结构取
+      - name: README numbers match reality
+        run: |
+          # || true 让提取失败落进下方 test -n 的中文报错,而非被 pipefail 静默终止
+          tests=$(grep -oE 'Ran [0-9]+ tests' "$RUNNER_TEMP/unittest.log" \
+            | grep -oE '[0-9]+' | head -1) || true
+          probes=$(python -c "import json; d = json.load(\
+            open('$RUNNER_TEMP/adv-metrics.json')); print(d['metrics']['total'])") || true
+          test -n "$tests" || { echo "未能在 unittest.log 中找到 Ran N tests"; exit 1; }
+          test -n "$probes" || { echo "未能从 adv-metrics.json 解析 metrics.total"; exit 1; }
+          python tools/check_readme_numbers.py --tests "$tests" --probes "$probes"

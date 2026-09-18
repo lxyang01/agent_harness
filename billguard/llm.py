@@ -14,6 +14,18 @@ class LLM(Protocol):
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str: ...
 
 
+def _metrics() -> Any:
+    """全局指标实例(billguard.metrics.METRICS)。
+
+    惰性导入 + 全量异常吞没:本模块支持脱离包环境单独复用,埋点失败
+    (无包环境/指标模块缺失)时返回 None,业务路径完全不受影响。"""
+    try:
+        from .metrics import METRICS
+        return METRICS
+    except Exception:
+        return None
+
+
 class OpenAICompatibleLLM:
     """Zero-dependency Chat Completions client for OpenAI and OpenRouter."""
 
@@ -48,6 +60,23 @@ class OpenAICompatibleLLM:
         )
 
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:
+        # 埋点外壳:一次 complete() = 一次逻辑调用(calls/seconds 在 finally 记,
+        # 成败都算);失败额外计 failures;重试在 _complete 内部计数
+        metrics = _metrics()
+        started = time.perf_counter()
+        try:
+            return self._complete(messages, tools, metrics)
+        except Exception:
+            if metrics is not None:
+                metrics.inc("llm_failures_total")
+            raise
+        finally:
+            if metrics is not None:
+                metrics.inc("llm_calls_total")
+                metrics.observe("llm_call_seconds", time.perf_counter() - started)
+
+    def _complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
+                  metrics: Any = None) -> str:
         enriched = self._wire_messages(messages)
         schema_note = "可用工具 JSON Schema：\n" + json.dumps(tools, ensure_ascii=False)
         enriched.insert(1 if enriched and enriched[0]["role"] == "system" else 0,
@@ -63,6 +92,8 @@ class OpenAICompatibleLLM:
                 response = self._client.post("/chat/completions", json=request_body)
                 if response.status_code in {408, 429} or response.status_code >= 500:
                     if attempt < self.max_retries:
+                        if metrics is not None:
+                            metrics.inc("llm_retries_total")
                         time.sleep(0.5 * (2 ** attempt))
                         continue
                 response.raise_for_status()
@@ -81,6 +112,8 @@ class OpenAICompatibleLLM:
                 ) from exc
             except (httpx.RequestError, KeyError, IndexError, json.JSONDecodeError, ValueError) as exc:
                 if isinstance(exc, httpx.RequestError) and attempt < self.max_retries:
+                    if metrics is not None:
+                        metrics.inc("llm_retries_total")
                     time.sleep(0.5 * (2 ** attempt))
                     continue
                 raise RuntimeError(f"LLM request failed: {exc}") from exc

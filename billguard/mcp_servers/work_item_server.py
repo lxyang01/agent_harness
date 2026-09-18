@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+
+from . import apply_streamable_bind
 
 from ..work_items import WorkItemStore
 
-1
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False,
                             idempotentHint=True, openWorldHint=False)
 PREPARE_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
@@ -18,9 +22,30 @@ PREPARE_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
 COMMIT_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
                                idempotentHint=True, openWorldHint=False)
 
+# F6:进程级 PG 连接池单例;仅当设置了 BILLGUARD_PG_DSN 时才会创建。
+_PG_POOL = None
+
+
+def _build_store(data_dir: str | Path):
+    """存储工厂(F6):设置 BILLGUARD_PG_DSN 时用 PG(进程级单例连接池),
+    未设置时保持 SQLite 行为不变。CLI(approve/reject/pending)与 MCP 服务
+    共用本工厂,保证分布式模式下两处操作同一份工单数据。"""
+    global _PG_POOL
+    dsn = os.environ.get("BILLGUARD_PG_DSN")
+    if not dsn:
+        return WorkItemStore(data_dir)
+    from ..storage_pg import PGWorkItemStore, new_pg_pool  # 惰性导入:stdio 模式不依赖 psycopg
+    if _PG_POOL is None:
+        _PG_POOL = new_pg_pool(dsn)
+        # 启动门禁:schema 落后于 migrations/ 时拒绝服务;AUTO_MIGRATE=1 自补齐
+        from ..migrate import require_current
+        require_current(
+            _PG_POOL, auto=os.environ.get("BILLGUARD_AUTO_MIGRATE") == "1")
+    return PGWorkItemStore(_PG_POOL)
+
 
 def build_server(data_dir: str | Path) -> FastMCP:
-    store = WorkItemStore(data_dir)
+    store = _build_store(data_dir)
     server = FastMCP(
         "Work Item MCP",
         instructions=(
@@ -30,6 +55,11 @@ def build_server(data_dir: str | Path) -> FastMCP:
         json_response=True,
         stateless_http=True,
     )
+
+    @server.custom_route("/health", methods=["GET"])
+    async def health(_request: Request) -> Response:
+        """就绪探针(compose healthcheck):只确认进程与 HTTP 栈存活,不触存储。"""
+        return JSONResponse({"ok": True})
 
     @server.tool(name="list_issues", annotations=READ_ONLY, structured_output=True)
     def list_issues(status: Literal["open", "in_progress", "done"] | None = None,
@@ -108,7 +138,7 @@ def main() -> None:
     subparsers.add_parser("pending")
     args = parser.parse_args()
 
-    store = WorkItemStore(args.data_dir)
+    store = _build_store(args.data_dir)
     if args.command == "approve":
         print(json.dumps(store.decide(args.approval_id, True, args.by), ensure_ascii=False, indent=2))
         return
@@ -123,8 +153,8 @@ def main() -> None:
     host = getattr(args, "host", "127.0.0.1")
     port = getattr(args, "port", 8020)
     transport = getattr(args, "transport", "streamable-http")
-    server.settings.host = host
-    server.settings.port = port
+    # 按最终绑定地址重算 DNS 重绑定防护(否则 0.0.0.0 下服务名 Host 被 421)
+    apply_streamable_bind(server, host, port)
     server.run(transport=transport)
 
 

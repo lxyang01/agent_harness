@@ -1,0 +1,6 @@
+-- init.sql:薄引导占位 —— 表结构已改由仓库根 migrations/ 目录管理
+-- (billguard/migrate.py runner;compose 里 BILLGUARD_AUTO_MIGRATE=1 让
+-- web/MCP/users 的 PG 入口启动时自动应用全部迁移)。
+-- 保留本文件仅为兼容历史文档/挂载引用;PG 的 POSTGRES_DB 环境变量已负责
+-- 在全新 pgdata 卷上创建空的 billguard 库,无需在此执行任何 SQL。
+-- 旧流程(本文件建 13 张表)等价于 migrations/V001_init.up.sql。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import re
 import secrets
 import sqlite3
@@ -9,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 
 ROLES = ("admin", "user")
@@ -286,19 +287,37 @@ def session_token_from_cookie(header: str) -> str | None:
     return None
 
 
+def _secure_cookies_enabled() -> bool:
+    """BILLGUARD_SECURE_COOKIES 为真值("1"/"true",大小写不敏感)时,
+    会话 Cookie 追加 Secure 属性(仅经 https 传输)。函数内读 env,
+    缺省关闭(演示部署是 http),测试可随时翻转。"""
+    return os.environ.get("BILLGUARD_SECURE_COOKIES", "").strip().lower() in {"1", "true"}
+
+
 def session_cookie(token: str) -> str:
-    return (f"{_COOKIE_NAME}={token}; HttpOnly; SameSite=Strict; Path=/; "
-            f"Max-Age={SESSION_TTL_DAYS * 86400}")
+    cookie = (f"{_COOKIE_NAME}={token}; HttpOnly; SameSite=Strict; Path=/; "
+              f"Max-Age={SESSION_TTL_DAYS * 86400}")
+    if _secure_cookies_enabled():
+        cookie += "; Secure"
+    return cookie
 
 
 def clear_session_cookie() -> str:
-    return f"{_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+    cookie = f"{_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+    if _secure_cookies_enabled():
+        cookie += "; Secure"
+    return cookie
 
 
 class Authenticator:
-    """Single identity-resolution boundary; swap this class for SSO later."""
+    """Single identity-resolution boundary; swap this class for SSO later.
 
-    def __init__(self, users: UserStore, sessions: AuthSessionStore) -> None:
+    users/sessions 为鸭子类型后端,调用面不变:
+    - 单进程:UserStore / AuthSessionStore(SQLite,consume 语义)
+    - 分布式:PGUserStore / RedisAuthSessions(resolve 语义,Redis 滑动续期)
+    Cookie/token 机制(解析、下发、登出)与两种后端完全无关。"""
+
+    def __init__(self, users: Any, sessions: Any) -> None:
         self.users = users
         self.sessions = sessions
 
@@ -311,11 +330,19 @@ class Authenticator:
         if token:
             self.sessions.delete(token)
 
+    def _consume_session(self, token: str) -> str | None:
+        """AuthSessionStore.consume 与 RedisAuthSessions.resolve 同语义
+        (校验 token 并按阈值滑动续期),按后端实际提供的方法适配。"""
+        consume = getattr(self.sessions, "consume", None)
+        if consume is not None:
+            return consume(token)
+        return self.sessions.resolve(token)
+
     def resolve_user(self, headers) -> User:
         token = session_token_from_cookie(headers.get("Cookie", ""))
         if not token:
             raise AuthError("未登录或会话已失效")
-        username = self.sessions.consume(token)
+        username = self._consume_session(token)
         if username is None:
             raise AuthError("登录已过期,请重新登录")
         user = self.users.get(username)  # 用户被删除则失败

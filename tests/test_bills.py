@@ -44,6 +44,59 @@ class ImportTests(unittest.TestCase):
             self.assertEqual(0, result["imported_rows"])
 
 
+class OverviewCoverageTests(unittest.TestCase):
+    """overview 必须带出过滤后数据集的实际覆盖区间(空结果缺日期锚点会诱发模型编造年份)。"""
+
+    def test_overview_reports_data_coverage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service = BillService(Path(temp))
+            service.import_bills("demo.csv", demo_csv())
+            # 全量:demo 数据跨 2026-07-05..2026-08-06
+            overview = service.overview()
+            self.assertEqual("2026-07-05", overview["data_from"])
+            self.assertEqual("2026-08-06", overview["data_to"])
+            # 非空过滤集:区间必须来自过滤后的行,而非全库
+            july = service.overview(BillFilters(date_from="2026-07-01", date_to="2026-07-31"))
+            self.assertEqual(2, july["count"])
+            self.assertEqual("2026-07-05", july["data_from"])
+            self.assertEqual("2026-07-05", july["data_to"])
+
+    def test_overview_coverage_none_when_no_rows(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service = BillService(Path(temp))
+            service.import_bills("demo.csv", demo_csv())
+            # 过滤后为空(如 9 月无数据):无覆盖区间可报
+            empty = service.overview(BillFilters(date_from="2026-09-01", date_to="2026-09-30"))
+            self.assertEqual(0, empty["count"])
+            self.assertIsNone(empty["data_from"])
+            self.assertIsNone(empty["data_to"])
+            # 空库同理
+            fresh = BillService(Path(temp) / "fresh")
+            blank = fresh.overview()
+            self.assertIsNone(blank["data_from"])
+            self.assertIsNone(blank["data_to"])
+
+    def test_overview_data_note_empty_db_vs_filtered_empty(self):
+        """空结果集必须带确定性说明:整库为空提示导入;仅筛选落空提示放宽条件。
+
+        None 日期锚点 + 明确 note 双保险,杜绝模型在空库时编造“2024年6月”类区间。"""
+        with tempfile.TemporaryDirectory() as temp:
+            # 空库:note 指向“库为空,先导入”
+            blank = BillService(Path(temp) / "fresh").overview()
+            self.assertEqual(0, blank["count"])
+            self.assertIn("账单库为空", blank["data_note"])
+            self.assertIn("导入", blank["data_note"])
+            # 有数据但筛选落空:note 指向筛选条件
+            service = BillService(Path(temp))
+            service.import_bills("demo.csv", demo_csv())
+            empty = service.overview(BillFilters(date_from="2026-09-01", date_to="2026-09-30"))
+            self.assertEqual(0, empty["count"])
+            self.assertIsNone(empty["data_from"])
+            self.assertIn("筛选条件", empty["data_note"])
+            # 非空结果集:不带提示
+            self.assertIsNone(service.overview()["data_note"])
+
+
 class SubscriptionTests(unittest.TestCase):
     def test_subscriptions_import_and_hike_detection(self):
         with tempfile.TemporaryDirectory() as temp:

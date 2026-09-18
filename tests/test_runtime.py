@@ -53,6 +53,7 @@ class _SlowHandler(BaseHTTPRequestHandler):
 class BoundedServerTests(unittest.TestCase):
     def test_saturation_returns_503(self):
         from billguard.web import BoundedHTTPServer
+        from billguard.metrics import METRICS
         _SlowHandler.started = threading.Event()
         server = BoundedHTTPServer(("127.0.0.1", 0), _SlowHandler,
                                    max_threads=1, queue_capacity=0)
@@ -60,6 +61,7 @@ class BoundedServerTests(unittest.TestCase):
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         base = f"http://127.0.0.1:{server.server_address[1]}"
+        counters_before = METRICS.snapshot()["counters"]
 
         holder = []
 
@@ -77,6 +79,12 @@ class BoundedServerTests(unittest.TestCase):
         self.assertIn("服务繁忙", body)
         thread.join(timeout=5)
         self.assertEqual([b"ok"], holder)
+        # 埋点:满载 503 不经 handler._json,由 _reject_busy 直接计数
+        counters = METRICS.snapshot()["counters"]
+        self.assertEqual(counters_before.get("http_status_503", 0) + 1,
+                         counters.get("http_status_503", 0))
+        self.assertEqual(counters_before.get("http_requests_total", 0) + 1,
+                         counters.get("http_requests_total", 0))
 
 
 if __name__ == "__main__":

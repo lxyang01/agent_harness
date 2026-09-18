@@ -7,34 +7,51 @@ import unittest
 import urllib.error
 import urllib.request
 from http.cookiejar import CookieJar
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from tests.llm_doubles import FinalLLM
-from billguard.auth import AuthSessionStore, Authenticator, UserStore
+from billguard.auth import Authenticator
+from billguard.coordination import RedisAuthSessions
+from billguard.storage_pg import (
+    PGBillService, PGEvidenceStore, PGSessionStore, PGTraceStore, PGUserStore,
+)
 from billguard.web import BusyError, BillGuardApp, make_handler
-from http.server import ThreadingHTTPServer
+
+from tests.conftest import StoreTestCase
 
 
-class HttpAuthTests(unittest.TestCase):
+class HttpAuthTests(StoreTestCase):
+    """HTTP 层鉴权/能力门禁:PG 存储 + Redis 会话(分布式装配)。"""
+
     def setUp(self):
+        super().setUp()
         self._temp = tempfile.TemporaryDirectory()
         root = Path(self._temp.name)
-        users = UserStore(root / "auth")
+        self.addCleanup(self._temp.cleanup)
+        users = PGUserStore(self.pool)
         users.create("admin", "admin-pass-1234", "admin")
         users.create("user1", "user-pass-123", "user")
         self.app = BillGuardApp(
             root / "web", root / "docs", FinalLLM(),
-            authenticator=Authenticator(users, AuthSessionStore(root / "auth")))
+            authenticator=Authenticator(users, RedisAuthSessions(self.redis)),
+            bills=PGBillService(self.pool),
+            session_store=PGSessionStore(self.pool),
+            evidence_store=PGEvidenceStore(self.pool),
+            trace_store=PGTraceStore(self.pool),
+            redis_client=self.redis,
+        )
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.app))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
         self.jar = CookieJar()
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.jar))
 
     def tearDown(self):
+        # LIFO:先 shutdown 再 server_close(顺序颠倒会在 Windows 上产生套接字竞态噪声)
         self.server.shutdown()
         self.server.server_close()
-        self._temp.cleanup()
 
     def post(self, path: str, body: dict):
         request = urllib.request.Request(

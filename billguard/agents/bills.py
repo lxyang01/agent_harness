@@ -30,9 +30,10 @@ BILL_AGENT_SPEC = AgentSpec(
 6. 判断订阅是否涨价以 subscriptions.expected_amount 为基准；没有商户公告、账单明细或复现证据时禁止写“已确认根因”。
 7. 原始账单可能包含敏感信息，只能使用工具返回的脱敏样本。
 8. 给出简洁、可执行的处理建议并说明证据范围。
-9. 用户要求取消/退订/不续费订阅或退款时,这是你的本职能力:调用 work-items.prepare_issue 创建工单(标题写清目标订阅),再调用 work-items.commit_issue 提交;系统会自动暂停等待人工审批,批准后才会真正执行。不要拒绝用户,也不要让用户自行联系客服或去商户设置操作——发起工单就是你处理这类请求的正确方式。若 work-items 工具不在可用列表,如实说明当前未接入工单服务、需以 MCP 模式启动并接入 Work Item 服务后才能发起审批,同样不要建议用户自行操作。
+9. 用户要求取消/退订/不续费订阅或退款时,这是你的本职能力:调用 work-items.prepare_issue 创建工单(标题写清目标订阅),再调用 work-items.commit_issue 提交;系统会自动暂停等待人工审批,批准后才会真正执行。prepare_issue 仅创建草稿,必须紧接着调用 commit_issue 提交(否则用户看不到审批卡片);在调用 commit_issue 之前,禁止对用户说“已发起申请/已提交/等待审批”一类话术。不要拒绝用户,也不要让用户自行联系客服或去商户设置操作——发起工单就是你处理这类请求的正确方式。若 work-items 工具不在可用列表,如实说明当前未接入工单服务、需以 MCP 模式启动并接入 Work Item 服务后才能发起审批,同样不要建议用户自行操作。
 10. 用户要求标记或更新交易核查状态时,先用搜索定位相关交易,再调用 bill.update_status(工具可用时)。
-11. 不执行任意 SQL、Shell、文件修改或外部网络请求。""",
+11. 不执行任意 SQL、Shell、文件修改或外部网络请求。
+12. 时间表述必须以工具返回的日期区间与当前日期为基准;所查月份无数据时,用工具返回的数据覆盖范围(如 data_from/data_to)如实说明“数据只覆盖 X 到 Y”,禁止编造年份或区间,禁止把数据里的最新月份称作“本月”。""",
     tool_names=("bill_overview", "bill_compare", "bill_anomalies", "bill_search", "bill_samples"),
     max_steps=8,
 )
@@ -115,15 +116,20 @@ def build_bill_registry(service: BillService) -> ToolRegistry:
 def create_bill_agent(llm: LLM, session_id: str, data_dir: str | Path = ".sessions",
                       service: BillService | None = None,
                       skill_dir: str | Path | None = None,
-                      run_timeout: float | None = None) -> HarnessEngine:
+                      run_timeout: float | None = None,
+                      sessions: SessionStore | None = None,
+                      trace_writer: Any = None) -> HarnessEngine:
+    """sessions/trace_writer 缺省(None)时按 data_dir 建文件版,行为与单进程一致;
+    分布式模式由 web 层注入 PGSessionStore/PGTraceStore。"""
     service = service or BillService(Path(data_dir) / "billguard")
     skill_dir = Path(skill_dir) if skill_dir is not None else Path(__file__).resolve().parents[2] / "skills"
     return HarnessEngine(
         replace(BILL_AGENT_SPEC, run_timeout=run_timeout),
         llm,
         build_bill_registry(service),
-        SessionStore(data_dir),
+        sessions if sessions is not None else SessionStore(data_dir),
         skills=SkillRuntime(skill_dir),
+        trace_writer=trace_writer,
     )
 
 
@@ -132,11 +138,15 @@ def create_mcp_bill_agent(llm: LLM, session_id: str, manager: MCPClientManager,
                           skill_dir: str | Path | None = None,
                           policy_gateway: PolicyGateway | None = None,
                           registry: ToolRegistry | None = None,
-                          run_timeout: float | None = None) -> HarnessEngine:
+                          run_timeout: float | None = None,
+                          sessions: SessionStore | None = None,
+                          trace_writer: Any = None) -> HarnessEngine:
     """Create the bill Agent from tools dynamically advertised by MCP servers.
 
     registry 允许调用方(如 web 层)在 manager.register_tools 完成后注入
-    owner 身份边界再交给 Harness;缺省时仍由 manager 即时发现并注册。"""
+    owner 身份边界再交给 Harness;缺省时仍由 manager 即时发现并注册。
+    sessions/trace_writer 缺省(None)时按 data_dir 建文件版,行为与单进程一致;
+    分布式模式由 web 层注入 PGSessionStore/PGTraceStore。"""
     if registry is None:
         registry = ToolRegistry()
         for snapshot in manager.snapshots():
@@ -149,7 +159,8 @@ def create_mcp_bill_agent(llm: LLM, session_id: str, manager: MCPClientManager,
         spec,
         llm,
         registry,
-        SessionStore(data_dir),
+        sessions if sessions is not None else SessionStore(data_dir),
         skills=SkillRuntime(skill_dir),
         policy_gateway=policy_gateway,
+        trace_writer=trace_writer,
     )

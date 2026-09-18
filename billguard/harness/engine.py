@@ -4,6 +4,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .context import ContextBuilder
@@ -47,6 +48,15 @@ class _ToolExecution:
 EventHook = Callable[[RunEvent], None]
 
 
+def _metric_inc(name: str) -> None:
+    """埋点专用计数:惰性导入 + 异常吞没,观测永不破坏工具执行路径。"""
+    try:
+        from ..metrics import METRICS
+        METRICS.inc(name)
+    except Exception:
+        return
+
+
 class HarnessEngine:
     """Controlled Agent loop with optional Skill routing and durable approval checkpoints."""
 
@@ -54,7 +64,8 @@ class HarnessEngine:
                  sessions: SessionStore, context_builder: ContextBuilder | None = None,
                  hooks: list[EventHook] | None = None,
                  skills: SkillRuntime | None = None,
-                 policy_gateway: PolicyGateway | None = None) -> None:
+                 policy_gateway: PolicyGateway | None = None,
+                 trace_writer: Any = None) -> None:
         missing = set(spec.tool_names) - set(tools.names())
         if missing:
             raise ValueError(f"AgentSpec references unregistered tools: {', '.join(sorted(missing))}")
@@ -66,7 +77,10 @@ class HarnessEngine:
         self.skills = skills
         self.policy_gateway = policy_gateway
         self.hooks = list(hooks or [])
-        self.trace_logger = TraceLogger(sessions.root)
+        # 分布式模式注入 trace_writer(如 PGTraceStore.append_event)时,Trace 走
+        # 注入存储;缺省(None)保持单进程 TraceLogger(sessions.root) 行为不变。
+        self.trace_writer = trace_writer
+        self.trace_logger = None if trace_writer is not None else TraceLogger(sessions.root)
         self.hooks.append(self._trace_hook)
 
     @staticmethod
@@ -467,6 +481,7 @@ class HarnessEngine:
             "tool_start", trace_id, session_id, step,
             tool=tool_name, arguments=arguments,
         )
+        _metric_inc("tool_calls_total")  # 注册表层执行计数(本地与 MCP 工具同路径)
         tool_started = time.perf_counter()
         try:
             result: Any = self.tools.execute(tool_name, arguments, allowed=allowed_tools)
@@ -481,9 +496,23 @@ class HarnessEngine:
                 tool=tool_name, result=result,
                 latency_ms=round((time.perf_counter() - tool_started) * 1000, 2),
             )
-            execution = _ToolExecution(payload, True)
-            if full_payloads is not None:
-                full_payloads.append(payload)  # 门禁用完整值,截断只影响模型可见面
+            if (isinstance(result, dict) and result.get("degraded") is True
+                    and "error" in result
+                    and self.tools.get(tool_name).policy.risk_level == "high_write"):
+                # 降级的高写工具 = 实际未执行(熔断/重连中没有任何业务动作发生)。
+                # 按失败记账:审批恢复路径 mark_execution(False) 让审批卡如实
+                # 显示"执行失败"而非"已执行";completed_tools 不追加。降级载荷
+                # 仍进上下文,模型可给出"服务暂不可用"的降级回答。
+                # (degraded 标记是 mcp_runtime._make_handler 的降级契约;本地
+                # 工具不产生该形态的结果。)
+                error = str(result["error"])
+                self._emit("tool_error", trace_id, session_id, step,
+                           tool=tool_name, error=error)
+                execution = _ToolExecution(payload, False, error)
+            else:
+                execution = _ToolExecution(payload, True)
+                if full_payloads is not None:
+                    full_payloads.append(payload)  # 门禁用完整值,截断只影响模型可见面
         except ToolError as exc:
             payload = json.dumps({"error": str(exc)}, ensure_ascii=False)
             self._emit(
@@ -492,6 +521,8 @@ class HarnessEngine:
                 latency_ms=round((time.perf_counter() - tool_started) * 1000, 2),
             )
             execution = _ToolExecution(payload, False, str(exc))
+        if not execution.succeeded:
+            _metric_inc("tool_failures_total")
         self._append_tool_messages(
             session, working, tool_name, arguments, call_id,
             self._contextual_payload(payload, trace_id, step),
@@ -632,6 +663,19 @@ class HarnessEngine:
                 continue
 
     def _trace_hook(self, event: RunEvent) -> None:
+        if self.trace_writer is not None:
+            # 与 TraceLogger.log 同构的记录结构(timestamp/event/trace_id/step/agent
+            # + 事件数据);写入注入的追踪存储(如 PGTraceStore),且只会发生在
+            # web 层会话锁内的 run/resume/finalize 期间(单写者,规避首写竞态)。
+            record = {"timestamp": datetime.now(timezone.utc).isoformat(),
+                      "event": event.event_type,
+                      "trace_id": event.trace_id,
+                      "step": event.step,
+                      "agent": self.spec.name,
+                      **event.data}
+            self.trace_writer.append_event(
+                event.session_id, event.trace_id, self.spec.name, record)
+            return
         key = self.sessions._key(event.session_id)
         self.trace_logger.log(
             key, event.event_type, trace_id=event.trace_id,
